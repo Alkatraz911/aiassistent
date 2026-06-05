@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Протокол-ассистент</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📋 Протокол-ассистент <span class="badge" id="health">…</span></div>
+    <div class="mics">
+      <label>🎤 Интервьюер (канал 0)
+        <select id="mic0"></select>
+      </label>
+      <label>🎤 Опрашиваемый (канал 1)
+        <select id="mic1"></select>
+      </label>
+      <button id="refreshMics" class="ghost">⟳</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Левая колонка: ассистент + анкета -->
+    <section class="col left">
+      <h2>AI-ассистент · Анкета</h2>
+      <div id="assistantBox" class="assistant">
+        <p class="hint">Нажмите «Начать анкету», ассистент задаст вопросы голосом.</p>
+        <div class="assistant-prompt" id="assistantPrompt"></div>
+        <div class="assistant-controls" id="assistantControls" hidden>
+          <textarea id="answerInput" placeholder="Ответ (распознанный или введённый)…"></textarea>
+          <div class="row">
+            <button id="recordAnswer" class="ghost">🎤 Ответ голосом</button>
+            <button id="confirmAnswer">Подтвердить ответ →</button>
+          </div>
+        </div>
+        <button id="startAssistant">▶ Начать анкету</button>
+      </div>
+
+      <h3>Поля анкеты</h3>
+      <table class="fields" id="fieldsTable">
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- Правая колонка: протокол диалога -->
+    <section class="col right">
+      <div class="protocol-head">
+        <h2>Протокол диалога</h2>
+        <div class="rec-controls">
+          <button id="startRec" class="rec">● Начать запись</button>
+          <button id="stopRec" class="stop" disabled>■ Стоп</button>
+          <button id="saveBtn" class="ghost">💾 Сохранить</button>
+        </div>
+      </div>
+
+      <div class="player">
+        <audio id="audio" controls></audio>
+        <button id="loadAudio" class="ghost">↻ Загрузить фонограмму</button>
+        <span class="hint">Клик по слову в тексте → перемотка</span>
+      </div>
+
+      <div id="transcript" class="transcript"></div>
+    </section>
+  </main>
+
+  <!-- модалка переименования спикера -->
+  <div id="speakerModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>Маркировка голоса</h3>
+      <p>Канал <b id="modalChannel"></b>. Задайте метку спикера:</p>
+      <div class="presets">
+        <button data-v="Интервьюер">Интервьюер</button>
+        <button data-v="Опрашиваемый">Опрашиваемый</button>
+        <button data-v="Помощник">Помощник</button>
+        <button data-v="Переводчик">Переводчик</button>
+      </div>
+      <input id="speakerInput" type="text" placeholder="Своя метка…" />
+      <div class="row">
+        <button id="speakerCancel" class="ghost">Отмена</button>
+        <button id="speakerApply">Применить ко всем репликам</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="audio-capture.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

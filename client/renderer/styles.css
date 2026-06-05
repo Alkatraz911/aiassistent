@@ -1,0 +1,92 @@
+* { box-sizing: border-box; }
+/* атрибут hidden должен побеждать любые display-правила (модалка, контролы) */
+[hidden] { display: none !important; }
+body {
+  margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
+  color: #1c2230; background: #eef1f6; height: 100vh; display: flex; flex-direction: column;
+}
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; background: #1f2a44; color: #fff; gap: 16px; flex-wrap: wrap;
+}
+.brand { font-weight: 600; font-size: 16px; }
+.badge { font-size: 12px; background: #44507a; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
+.badge.ok { background: #2e7d52; }
+.badge.err { background: #a5374a; }
+.mics { display: flex; gap: 14px; align-items: center; font-size: 12px; }
+.mics label { display: flex; flex-direction: column; gap: 3px; }
+.mics select { min-width: 180px; padding: 3px; }
+
+main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 0; overflow: hidden; }
+.col { padding: 16px; overflow-y: auto; }
+.left { background: #f7f9fc; border-right: 1px solid #d9dfea; }
+.right { background: #fff; display: flex; flex-direction: column; }
+h2 { margin: 0 0 12px; font-size: 16px; }
+h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #66718c; margin: 18px 0 8px; }
+.hint { color: #8a93a8; font-size: 12px; }
+
+button {
+  cursor: pointer; border: none; border-radius: 7px; padding: 8px 14px;
+  font-size: 13px; background: #3a5bd9; color: #fff; font-weight: 500;
+}
+button:hover { filter: brightness(1.06); }
+button:disabled { opacity: .45; cursor: default; }
+button.ghost { background: #e3e8f2; color: #2b3550; }
+button.rec { background: #c5384a; }
+button.stop { background: #6b7488; }
+.row { display: flex; gap: 8px; margin-top: 8px; }
+
+.assistant { background: #fff; border: 1px solid #dde3ee; border-radius: 10px; padding: 14px; }
+.assistant-prompt {
+  font-size: 15px; line-height: 1.5; min-height: 24px; margin: 8px 0;
+  padding: 10px; background: #eef3ff; border-radius: 8px; display: none;
+}
+.assistant-prompt.show { display: block; }
+.assistant-controls textarea {
+  width: 100%; min-height: 64px; border: 1px solid #cfd6e4; border-radius: 7px;
+  padding: 8px; font-size: 14px; resize: vertical;
+}
+
+table.fields { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.fields td { padding: 6px 8px; border-bottom: 1px solid #e7ebf3; vertical-align: top; }
+table.fields td.k { color: #66718c; width: 42%; }
+table.fields td.v { font-weight: 500; }
+td.v.filled { color: #1f7a45; }
+
+.protocol-head { display: flex; justify-content: space-between; align-items: center; }
+.rec-controls { display: flex; gap: 8px; }
+.player { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.player audio { height: 34px; }
+
+.transcript { flex: 1; overflow-y: auto; padding: 8px 0; }
+.segment {
+  display: flex; gap: 10px; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px;
+  background: #f6f8fc; border: 1px solid transparent;
+}
+.segment:hover { border-color: #d4dcec; }
+.segment.active { background: #fff6e0; border-color: #f0cf8a; }
+.seg-speaker {
+  flex-shrink: 0; min-width: 110px; font-weight: 600; cursor: pointer;
+  color: #2c4ba0; user-select: none;
+}
+.seg-speaker:hover { text-decoration: underline; }
+.seg-speaker.ch0 { color: #2c4ba0; }
+.seg-speaker.ch1 { color: #2f8a57; }
+.seg-speaker.auto { color: #9a6a1e; }
+.seg-body { flex: 1; }
+.seg-text { font-size: 14px; line-height: 1.5; outline: none; }
+.seg-text[contenteditable="true"]:focus { background: #fffef5; box-shadow: 0 0 0 2px #f0cf8a55; border-radius: 4px; }
+.word { cursor: pointer; padding: 0 1px; border-radius: 3px; }
+.word:hover { background: #dce6ff; }
+.word.playing { background: #ffd873; }
+.seg-meta { font-size: 11px; color: #97a0b5; margin-top: 3px; }
+.seg-meta .edited { color: #b5732a; }
+
+.modal {
+  position: fixed; inset: 0; background: #1c223066; display: flex;
+  align-items: center; justify-content: center; z-index: 50;
+}
+.modal-card { background: #fff; border-radius: 12px; padding: 20px; width: 360px; }
+.modal-card .presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.modal-card .presets button { background: #e3e8f2; color: #2b3550; }
+.modal-card input { width: 100%; padding: 8px; border: 1px solid #cfd6e4; border-radius: 7px; margin-bottom: 10px; }

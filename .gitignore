@@ -1,0 +1,16 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+backend/.env
+
+# Node / Electron
+client/node_modules/
+client/dist/
+
+# Данные сессий (фонограммы, протоколы) — не коммитим
+backend/storage/sessions/
+*.wav
+
+# Модели ASR (кэш)
+backend/models/
