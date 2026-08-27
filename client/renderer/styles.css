@@ -13,6 +13,8 @@ body {
 .badge { font-size: 12px; background: #44507a; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
 .badge.ok { background: #2e7d52; }
 .badge.err { background: #a5374a; }
+/* GPU просили, но не поднялся: работаем, но медленнее — предупреждение, а не ошибка. */
+.badge.warn { background: #a8762e; cursor: help; }
 .mics { display: flex; gap: 14px; align-items: center; font-size: 12px; }
 .mics label { display: flex; flex-direction: column; gap: 3px; }
 .mics select { min-width: 180px; padding: 3px; }

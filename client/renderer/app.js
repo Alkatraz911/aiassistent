@@ -21,8 +21,13 @@ const state = {
 async function checkHealth() {
   try {
     const r = await fetch(`${HTTP}/api/health`).then((x) => x.json());
-    $("health").textContent = `${r.asr} · ${r.model}`;
-    $("health").className = "badge ok";
+    // Устройство показываем прямо в бейдже: одна и та же модель на CPU и на GPU — это разные
+    // режимы работы (large-v3 на CPU live не тянет вовсе), и видеть это надо ДО записи, а не
+    // потом по растущей задержке. r.warning непустой — GPU просили, но он не поднялся.
+    const dev = (r.device || "cpu").startsWith("cuda") ? "GPU" : "CPU";
+    $("health").textContent = `${r.asr} · ${r.model} · ${dev}`;
+    $("health").className = r.warning ? "badge warn" : "badge ok";
+    $("health").title = r.warning || "";
   } catch {
     $("health").textContent = "backend offline";
     $("health").className = "badge err";

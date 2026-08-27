@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import gc
 import threading
 from collections import OrderedDict
 
@@ -66,7 +67,17 @@ class ModelManager:
             with self._lock:
                 if key in self._providers:
                     return self._touch_locked(key)
-                self._evict_if_needed_locked()
+                evicted = self._evict_if_needed_locked()
+
+            # Освобождаем ВЫТЕСНЕННЫЕ модели до создания новой и вне лока. На CPU порядок не
+            # принципиален (ОС отдаст память под своп), на GPU — принципиален: VRAM жёстко
+            # ограничена, и если старая модель ещё жива в момент загрузки новой, на карте
+            # оказываются обе (large-v3 float16 — ~3 ГБ каждая) и загрузка падает с out of
+            # memory. Плюс явный `gc.collect()`: память CTranslate2 освобождается в деструкторе
+            # C++-объекта, а он ждёт, пока Python досчитает ссылки, — при циклах это отложенно.
+            if evicted:
+                evicted.clear()
+                gc.collect()
 
             model, device, compute = key
             provider = get_asr(model, device, compute)
@@ -83,14 +94,19 @@ class ModelManager:
             if key in self._refcount:
                 self._refcount[key] = max(0, self._refcount[key] - 1)
 
-    def _evict_if_needed_locked(self) -> None:
-        """Вызывается под `self._lock`."""
+    def _evict_if_needed_locked(self) -> list[ASRProvider]:
+        """Вызывается под `self._lock`. Возвращает вытесненные провайдеры, чтобы вызывающий
+        отпустил их ВНЕ лока (освобождение VRAM в деструкторе CTranslate2 — не мгновенное)."""
+        evicted: list[ASRProvider] = []
         if len(self._providers) < self._max_cached:
-            return
+            return evicted
         for key in list(self._lru.keys()):
             if len(self._providers) < self._max_cached:
                 break
             if self._refcount.get(key, 0) == 0:
                 self._lru.pop(key, None)
-                self._providers.pop(key, None)
+                provider = self._providers.pop(key, None)
                 self._refcount.pop(key, None)
+                if provider is not None:
+                    evicted.append(provider)
+        return evicted

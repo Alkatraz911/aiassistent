@@ -563,6 +563,13 @@ class SessionManager:
     def active_model(self) -> str:
         return self._active_key[0]
 
+    @property
+    def active_key(self) -> ModelKey:
+        """Полный ключ (модель, устройство, compute) — нужен диагностике `/api/health`, чтобы
+        показать РЕАЛЬНОЕ устройство, а не то, что просили: при провале GPU преполёт (main.py)
+        откатывает активный ключ на CPU."""
+        return self._active_key
+
     def set_active_model(self, key: ModelKey) -> None:
         """Меняет модель для НОВЫХ сессий (Блок 4) — уже созданные сессии хранят свой снапшот
         `asr_model_key` и не затрагиваются (см. `Session.__init__`)."""

@@ -33,6 +33,8 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
    py -3.11 -m venv .venv
    .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
+   # на NVIDIA-карте — добавить GPU-зависимости (устройство определится само):
+   #   pip install -r requirements-gpu.txt
    # быстрый прогон UI без модели:  $env:ASR_PROVIDER="stub"
    uvicorn app.main:app --host 127.0.0.1 --port 8000
    ```
@@ -54,3 +56,5 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
 - [x] Привязка аудио↔текст (клик по слову → перемотка, подсветка)
 - [x] AI-ассистент: сценарий анкеты, заполнение полей из ответов
 - [x] Хранение протокола (JSON) + фонограммы (WAV), слой аудита правок
+- [x] GPU-режим: автоопределение устройства, `large-v3` в реальном времени, батчинг длинного
+  аудио, GPU-финализация (alignment + диаризация) — см. `backend/README.md` «Запуск на GPU»

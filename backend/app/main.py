@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from . import config, telemetry
+from . import config, device, telemetry
 from .assistant import templates as templates_store
 from .assistant.questionnaire import build_script
 from .models import TemplateStep
@@ -38,9 +38,79 @@ app.add_middleware(
 )
 
 
+# --- преполёт: проверить устройство и прогреть модель до первой записи ---------
+
+STARTUP_WARNING: str | None = None      # непустая строка -> GPU просили, но не поднялся
+
+CUDA_HELP = (
+    "Проверьте: (1) `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` в этом venv "
+    "(CTranslate2 не тянет их сам); (2) свежий драйвер NVIDIA; (3) `nvidia-smi` видит карту."
+)
+
+
+def _preflight() -> None:
+    """Загружает и прогревает активную модель на старте, а не при первой реплике.
+
+    Смысл ровно в двух вещах, и обе — про то, что пользователь не должен ловить их в бою:
+    1. Ошибка GPU-конфигурации всплывает СЕЙЧАС, с внятным текстом, а не как «запись не
+       распознаётся» посреди допроса. При провале уезжаем на CPU — но не молча: причина
+       остаётся в `STARTUP_WARNING` и в `/api/health`, откуда её показывает бейдж клиента.
+    2. Первая реплика не оплачивает загрузку весов (large-v3 — секунды) и ленивую
+       инициализацию CUDA-модулей: `ModelManager.acquire` делает и загрузку, и warmup.
+    """
+    global STARTUP_WARNING
+    if config.ASR_PROVIDER == "stub":
+        print("[asr] stub-режим: модель не загружается")
+        return
+
+    key = manager.models.default_key()
+    print(f"[asr] устройство={key[1]} compute={key[2]} модель={key[0]} "
+          f"(запрошено WHISPER_DEVICE={config.WHISPER_DEVICE_REQUESTED}); {device.describe()}")
+    try:
+        manager.models.acquire(key)
+        manager.models.release(key)
+        print(f"[asr] модель {key[0]} загружена и прогрета на {key[1]}")
+        return
+    except Exception as exc:
+        if not key[1].startswith("cuda"):
+            STARTUP_WARNING = f"не удалось загрузить модель {key[0]}: {exc}"
+            print(f"[asr] ОШИБКА: {STARTUP_WARNING}")
+            return
+        STARTUP_WARNING = (f"GPU запрошен ({key[1]}/{key[2]}), но не поднялся: {exc}. "
+                           f"{CUDA_HELP} Работаем на CPU — распознавание будет медленнее.")
+        print(f"[asr] ОШИБКА: {STARTUP_WARNING}")
+
+    # Понижение до CPU: не молча (см. STARTUP_WARNING и /api/health), но и не с падением
+    # сервера — сорванная запись хуже медленной.
+    cpu_key = (config.WHISPER_MODEL_CPU_FALLBACK, "cpu", "int8")
+    try:
+        manager.models.acquire(cpu_key)
+        manager.models.release(cpu_key)
+        manager.set_active_model(cpu_key)
+        print(f"[asr] откат на CPU: модель {cpu_key[0]}")
+    except Exception as exc:
+        print(f"[asr] откат на CPU тоже не удался: {exc}")
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    # В отдельном потоке: загрузка модели — секунды, а event loop должен принимать соединения.
+    asyncio.get_running_loop().run_in_executor(None, _preflight)
+
+
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "asr": config.ASR_PROVIDER, "model": manager.active_model}
+    cuda_devices, cuda_why = device.probe_cuda()
+    return {
+        "ok": STARTUP_WARNING is None,
+        "asr": config.ASR_PROVIDER,
+        "model": manager.active_model,
+        "device": manager.active_key[1],
+        "compute": manager.active_key[2],
+        "cuda_devices": cuda_devices,
+        "cuda_unavailable_reason": cuda_why or None,
+        "warning": STARTUP_WARNING,
+    }
 
 
 # --- AI-ассистент: сценарий анкеты --------------------------------------
@@ -277,10 +347,17 @@ CURATED_MODELS = ["small", "medium", "turbo", "large-v3"]
 
 @app.get("/api/models")
 def list_models() -> dict:
+    key = manager.active_key
     return {
         "models": CURATED_MODELS,
-        "active": manager.models.default_key()[0],
+        "active": key[0],
         "loaded": [k[0] for k in manager.models.loaded_keys()],
+        # Устройство отдаём вместе со списком, чтобы UI мог показать, на чём реально считаем:
+        # выбор «large-v3» означает совершенно разные вещи на GPU и на CPU (на CPU он не тянет
+        # live вовсе), и пользователь должен видеть это до начала записи, а не по задержке.
+        "device": key[1],
+        "compute": key[2],
+        "warning": STARTUP_WARNING,
     }
 
 
@@ -294,9 +371,24 @@ async def switch_model(req: ModelSwitchReq):
         return JSONResponse(
             {"error": "нельзя менять модель во время активной записи"}, status_code=409)
     import time
-    key = (req.model, req.device or config.WHISPER_DEVICE, req.compute or config.WHISPER_COMPUTE)
+    # Устройство берём от АКТИВНОГО ключа, а не из config: если преполёт откатил нас на CPU
+    # (GPU не поднялся), переключение модели из UI не должно молча возвращать нас на cuda.
+    active = manager.active_key
+    key = (req.model, req.device or active[1], req.compute or active[2])
     t0 = time.monotonic()
-    await asyncio.to_thread(manager.models.acquire, key)
+    try:
+        await asyncio.to_thread(manager.models.acquire, key)
+    except RuntimeError as exc:
+        # Типовой отказ именно на GPU: две тяжёлые модели в кэше (ASR_MAX_CACHED_MODELS=2) не
+        # влезают в VRAM. Сообщение CTranslate2 про out of memory ничего не говорит оператору о
+        # том, что делать, — переводим его в действие.
+        if "out of memory" in str(exc).lower():
+            return JSONResponse(
+                {"error": f"не хватает видеопамяти для модели {req.model}. Уменьшите "
+                          f"ASR_MAX_CACHED_MODELS до 1, возьмите модель полегче или "
+                          f"WHISPER_COMPUTE=int8_float16"},
+                status_code=507)
+        raise
     manager.models.release(key)   # acquire() держит рефкаунт только на время использования джобом
     manager.set_active_model(key)
     took_ms = int((time.monotonic() - t0) * 1000)

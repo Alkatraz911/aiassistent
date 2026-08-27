@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from .. import config
+from .. import config, device
 
 
 class WordAligner:
     def __init__(self) -> None:
         self.model = None
         self.processor = None
+        self.device = "cpu"
         self._vocab: dict[str, int] = {}
         self._blank = 0
         self._delim = None
@@ -29,9 +30,10 @@ class WordAligner:
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
         self._torch = torch
+        self.device = device.resolve_torch_device(config.FINALIZE_DEVICE)
         name = config.ALIGN_MODEL
         self.processor = Wav2Vec2Processor.from_pretrained(name)
-        self.model = Wav2Vec2ForCTC.from_pretrained(name).eval()
+        self.model = Wav2Vec2ForCTC.from_pretrained(name).eval().to(self.device)
         self._vocab = {k.lower(): v for k, v in self.processor.tokenizer.get_vocab().items()}
         self._blank = self.processor.tokenizer.pad_token_id or 0
         # символ-разделитель слов в wav2vec2 (обычно "|")
@@ -70,9 +72,12 @@ class WordAligner:
 
         with torch.inference_mode():
             inp = self.processor(audio, sampling_rate=sample_rate,
-                                 return_tensors="pt").input_values
+                                 return_tensors="pt").input_values.to(self.device)
             logits = self.model(inp).logits[0]            # (T, V)
-            emission = torch.log_softmax(logits, dim=-1)
+            # Эмиссию считаем в float32 и возвращаем на CPU: сам forced_align ниже — это
+            # динамическое программирование по (T x targets), на GPU оно не ускоряется, а вот
+            # тяжёлый прямой проход wav2vec2 выше — ускоряется, ради него всё и затевалось.
+            emission = torch.log_softmax(logits.float(), dim=-1).cpu()
 
         T = emission.size(0)
         if T < len([t for t in token_word if t >= 0]):
