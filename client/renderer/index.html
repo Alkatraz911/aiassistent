@@ -9,6 +9,9 @@
   <header class="topbar">
     <div class="brand">📋 Протокол-ассистент <span class="badge" id="health">…</span></div>
     <div class="mics">
+      <label>Модель ASR
+        <select id="modelSelect"></select>
+      </label>
       <label>🎤 Интервьюер (канал 0)
         <select id="mic0"></select>
       </label>
@@ -23,13 +26,29 @@
     <!-- Левая колонка: ассистент + анкета -->
     <section class="col left">
       <h2>AI-ассистент · Анкета</h2>
+      <div class="template-row">
+        <select id="templateSelect"></select>
+        <button id="newTemplateBtn" class="ghost">+ Новый</button>
+        <button id="editTemplateBtn" class="ghost">✎ Редактировать</button>
+      </div>
       <div id="assistantBox" class="assistant">
         <p class="hint">Нажмите «Начать анкету», ассистент задаст вопросы голосом.</p>
         <div class="assistant-prompt" id="assistantPrompt"></div>
         <div class="assistant-controls" id="assistantControls" hidden>
+          <div id="autoListenBox" class="auto-listen" hidden>
+            <span class="auto-listen-dot"></span> Слушаю ответ… (говорите, запись остановится сама)
+          </div>
+          <div id="autoConfirmBox" class="auto-confirm" hidden>
+            <p class="hint">Распознано — подтвердится автоматически через <span id="autoConfirmCountdown"></span>:</p>
+            <p id="autoConfirmText" class="auto-confirm-text"></p>
+            <div class="row">
+              <button id="autoFixBtn" class="ghost">✎ исправить</button>
+              <button id="autoRetryBtn" class="ghost">⟲ переслушать</button>
+            </div>
+          </div>
           <textarea id="answerInput" placeholder="Ответ (распознанный или введённый)…"></textarea>
           <div class="row">
-            <button id="recordAnswer" class="ghost">🎤 Ответ голосом</button>
+            <button id="recordAnswer" class="ghost">🎤 Ответ голосом (вручную)</button>
             <button id="confirmAnswer">Подтвердить ответ →</button>
           </div>
         </div>
@@ -49,6 +68,7 @@
         <div class="rec-controls">
           <button id="startRec" class="rec">● Начать запись</button>
           <button id="stopRec" class="stop" disabled>■ Стоп</button>
+          <button id="finalizeBtn" class="ghost">✨ Уточнить тайм-коды</button>
           <button id="saveBtn" class="ghost">💾 Сохранить</button>
         </div>
       </div>
@@ -57,6 +77,16 @@
         <audio id="audio" controls></audio>
         <button id="loadAudio" class="ghost">↻ Загрузить фонограмму</button>
         <span class="hint">Клик по слову в тексте → перемотка</span>
+      </div>
+
+      <div class="finalize-opts">
+        <label title="Если запись велась одним общим микрофоном — развести голоса по эмбеддингам">
+          <input type="checkbox" id="diarizeChk" /> Один общий микрофон (диаризация)
+        </label>
+        <label>Ожидаемое число голосов
+          <input type="number" id="numSpeakers" min="0" max="8" value="0" style="width:48px" />
+          <span class="hint">0 = авто</span>
+        </label>
       </div>
 
       <div id="transcript" class="transcript"></div>
@@ -79,6 +109,27 @@
         <button id="speakerCancel" class="ghost">Отмена</button>
         <button id="speakerApply">Применить ко всем репликам</button>
       </div>
+    </div>
+  </div>
+
+  <!-- модалка редактора шаблона анкеты -->
+  <div id="templateModal" class="modal" hidden>
+    <div class="modal-card modal-card-wide">
+      <h3 id="templateModalTitle">Шаблон анкеты</h3>
+      <div class="row">
+        <input id="templateName" type="text" placeholder="Название шаблона" style="flex:1" />
+      </div>
+      <input id="templateDescription" type="text" placeholder="Описание (необязательно)" />
+      <div id="templateSteps" class="template-steps"></div>
+      <div class="row">
+        <button id="addStepBtn" class="ghost">+ Добавить шаг</button>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <button id="templateCancel" class="ghost">Отмена</button>
+        <button id="templateDeleteBtn" class="ghost" style="color:#a5374a">Удалить шаблон</button>
+        <button id="templateSaveBtn">Сохранить</button>
+      </div>
+      <p class="hint" id="templateHint"></p>
     </div>
   </div>
 

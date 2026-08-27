@@ -7,3 +7,11 @@ faster-whisper==1.1.0
 requests==2.32.3
 python-multipart==0.0.20
 pydantic==2.10.4
+
+# Офлайн-финализация (без токенов): forced alignment + диаризация общего микрофона.
+# torch — CPU-сборка; на GPU-сервере ставьте CUDA-вариант с индекса PyTorch.
+torch==2.5.1
+torchaudio==2.5.1
+transformers==4.46.3
+speechbrain==1.0.2
+scikit-learn==1.6.0

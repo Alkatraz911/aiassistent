@@ -12,5 +12,9 @@ client/dist/
 backend/storage/sessions/
 *.wav
 
+# Шаблоны анкеты — генерируются автоматически при первом запуске (TemplateStore засеивает
+# builtin-шаблон), коммитить нечего.
+backend/storage/templates/
+
 # Модели ASR (кэш)
 backend/models/

@@ -9,8 +9,12 @@ const state = {
   ws: null,
   recording: false,
   captures: [],
-  segments: new Map(), // id -> {el, words:[{el,start,end}]}
+  segments: new Map(),      // id -> {el, words:[{el,start,end}]}
+  liveSegments: new Map(),  // channel -> {el, txtEl, channel, utteranceId} — ещё не финализированные реплики
   assistantStep: null,
+  flushed: true,            // false между отправкой "stop" и получением "stopped"
+  templateId: null,         // выбранный шаблон анкеты (Блок 5)
+  editingTemplateId: null,  // null = создаём новый, иначе редактируем существующий
 };
 
 // ---------- health + микрофоны ----------
@@ -23,6 +27,54 @@ async function checkHealth() {
     $("health").textContent = "backend offline";
     $("health").className = "badge err";
   }
+}
+
+// ---------- выбор модели ASR (Блок 4) ----------
+async function loadModels() {
+  try {
+    const r = await fetch(`${HTTP}/api/models`).then((x) => x.json());
+    const sel = $("modelSelect");
+    sel.innerHTML = "";
+    (r.models || []).forEach((m) => {
+      const o = document.createElement("option");
+      o.value = m; o.textContent = m + (r.loaded && r.loaded.includes(m) ? " ✓" : "");
+      sel.appendChild(o);
+    });
+    sel.value = r.active;
+  } catch {}
+}
+
+async function onModelChange() {
+  const sel = $("modelSelect");
+  const prev = sel.dataset.active || sel.value;
+  const model = sel.value;
+  sel.disabled = true;
+  $("health").textContent = "⏳ Загрузка модели…";
+  try {
+    const r = await fetch(`${HTTP}/api/models/switch`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert(data.error || "Не удалось переключить модель");
+      sel.value = prev;
+    } else {
+      sel.dataset.active = data.active;
+      await checkHealth();
+    }
+  } catch (e) {
+    alert("Ошибка переключения модели: " + e);
+    sel.value = prev;
+  } finally {
+    updateModelSelectEnabled();
+  }
+}
+
+function updateModelSelectEnabled() {
+  // Переключение модели запрещено во время активной записи — источник истины сервер (409),
+  // но дублируем блокировку на клиенте для мгновенной обратной связи.
+  $("modelSelect").disabled = state.recording;
 }
 
 async function loadMics() {
@@ -45,14 +97,32 @@ async function loadMics() {
   if (devices[1]) $("mic1").value = devices[1].deviceId;
 }
 
-// ---------- AI-ассистент: анкета ----------
-function speak(text) {
+// ---------- AI-ассистент: анкета (Блок 6 — автозапись ответа по паузам) ----------
+// speak(text, onDone) — основной путь: SpeechSynthesisUtterance.onend. Запасной таймер не
+// завершает озвучку напрямую, а проверяет speechSynthesis.speaking — так безопаснее, чем
+// считать TTS законченным просто по истечении времени (реальная гонка: таймер сработал бы
+// раньше, чем движок TTS реально замолчал, и микрофон услышал бы хвост синтеза).
+function speak(text, onDone) {
+  if (!text) { if (onDone) onDone(); return; }
   try {
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "ru-RU";
+    let done = false;
+    const finish = () => { if (done) return; done = true; if (onDone) onDone(); };
+    u.onend = finish;
+    u.onerror = finish;
     window.speechSynthesis.speak(u);
-  } catch {}
+    const fallbackMs = Math.max(3000, text.length * 90);
+    const checkFallback = () => {
+      if (done) return;
+      if (window.speechSynthesis.speaking) setTimeout(checkFallback, 300);
+      else finish();
+    };
+    setTimeout(checkFallback, fallbackMs);
+  } catch {
+    if (onDone) onDone();
+  }
 }
 
 function showStep(step) {
@@ -60,17 +130,105 @@ function showStep(step) {
   const promptEl = $("assistantPrompt");
   promptEl.textContent = "🤖 " + step.prompt;
   promptEl.classList.add("show");
-  speak(step.prompt);
   $("startAssistant").hidden = true;
+
   if (step.needs_answer) {
     $("assistantControls").hidden = false;
     $("answerInput").value = "";
-    $("answerInput").focus();
+    hideAutoBoxes();
   } else {
-    // info-шаг — кнопка «далее»
     $("assistantControls").hidden = true;
-    setTimeout(advanceInfo, 1200);
   }
+
+  // Сначала разъяснение (statement), затем сам вопрос (question) — озвучиваются по очереди;
+  // автослушание стартует только после того, как TTS РЕАЛЬНО закончил, не по таймеру вслепую.
+  const parts = [step.statement, step.question].filter(Boolean);
+  const sayNext = () => {
+    const text = parts.shift();
+    if (text === undefined) {
+      if (step.needs_answer) {
+        setTimeout(startAutoListening, 250);   // защитная пауза — микрофон не услышит хвост TTS
+      } else {
+        advanceInfo();
+      }
+      return;
+    }
+    speak(text, sayNext);
+  };
+  sayNext();
+}
+
+// ---------- автозапись ответа (Блок 6) ----------
+let autoRec = null;
+let autoConfirmTimer = null;
+
+function hideAutoBoxes() {
+  $("autoListenBox").hidden = true;
+  $("autoConfirmBox").hidden = true;
+  clearInterval(autoConfirmTimer);
+}
+
+function stopAutoListening() {
+  if (autoRec) { try { autoRec.stop(); } catch {} autoRec = null; }
+}
+
+function startAutoListening() {
+  if (!state.assistantStep || !state.assistantStep.needs_answer) return;
+  stopAutoListening();
+  hideAutoBoxes();
+  $("autoListenBox").hidden = false;
+  autoRec = new window.AudioCapture.AutoRecorder($("mic1").value, {});
+  autoRec.onSilence((hadSpeech) => {
+    $("autoListenBox").hidden = true;
+    if (hadSpeech) finishAutoListening();
+    // тишина (никто не ответил за maxWaitForSpeechMs) — тихо остаёмся на ручной форме
+  });
+  autoRec.start().catch(() => { $("autoListenBox").hidden = true; });
+}
+
+async function finishAutoListening() {
+  if (!autoRec) return;
+  const pcm = autoRec.stop();
+  autoRec = null;
+  if (!pcm.length) return;
+  const r = await fetch(`${HTTP}/api/transcribe`, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" },
+    body: pcm.buffer,
+  }).then((x) => x.json());
+  const text = (r.text || "").trim();
+  if (!text) return;   // не распознано — тихо остаёмся на ручной форме, без пустого автоподтверждения
+  $("answerInput").value = text;
+  showAutoConfirm(text);
+}
+
+// Окно подстраховки: распознанный текст показывается несколько секунд перед автоподтверждением
+// — оператор может исправить (переключиться на ручной ввод) или переслушать заново.
+function showAutoConfirm(text) {
+  $("autoConfirmBox").hidden = false;
+  $("autoConfirmText").textContent = text;
+  let secondsLeft = 2;
+  const render = () => { $("autoConfirmCountdown").textContent = secondsLeft + " с"; };
+  render();
+  autoConfirmTimer = setInterval(() => {
+    secondsLeft -= 1;
+    if (secondsLeft <= 0) {
+      clearInterval(autoConfirmTimer);
+      $("autoConfirmBox").hidden = true;
+      confirmAnswer();
+    } else {
+      render();
+    }
+  }, 1000);
+  $("autoFixBtn").onclick = () => {
+    clearInterval(autoConfirmTimer);
+    $("autoConfirmBox").hidden = true;
+    $("answerInput").focus();
+  };
+  $("autoRetryBtn").onclick = () => {
+    clearInterval(autoConfirmTimer);
+    $("autoConfirmBox").hidden = true;
+    startAutoListening();
+  };
 }
 
 async function advanceInfo() {
@@ -84,6 +242,8 @@ async function advanceInfo() {
 function handleNext(r) {
   renderFields(r.fields);
   if (r.next.finished) {
+    hideAutoBoxes();
+    stopAutoListening();
     $("assistantPrompt").textContent = "✅ Анкета заполнена. Можно переходить к диалогу.";
     $("assistantControls").hidden = true;
     return;
@@ -94,12 +254,161 @@ function handleNext(r) {
 async function startAssistant() {
   const step = await fetch(`${HTTP}/api/assistant/start`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION }),
+    body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
   }).then((x) => x.json());
   showStep(step);
 }
 
+// ---------- шаблоны анкеты (Блок 5) ----------
+async function loadTemplates() {
+  try {
+    const list = await fetch(`${HTTP}/api/templates`).then((x) => x.json());
+    const sel = $("templateSelect");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    list.forEach((t) => {
+      const o = document.createElement("option");
+      o.value = t.id;
+      o.textContent = `${t.name}${t.is_builtin ? " (стандартный)" : ""} — ${t.step_count} шаг.`;
+      sel.appendChild(o);
+    });
+    sel.value = list.some((t) => t.id === prev) ? prev : (list[0] ? list[0].id : "");
+    state.templateId = sel.value || null;
+  } catch {}
+}
+
+function stepRowTemplate(step) {
+  const row = document.createElement("div");
+  row.className = "step-row";
+  row.innerHTML = `
+    <div class="step-head">
+      <input class="step-label" type="text" placeholder="Название шага" value="${escAttr(step.label || "")}" />
+      <div class="step-order">
+        <button type="button" class="step-up" title="Выше">▲</button>
+        <button type="button" class="step-down" title="Ниже">▼</button>
+      </div>
+      <button type="button" class="step-remove" title="Удалить шаг">✕</button>
+    </div>
+    <div class="step-meta">
+      <label>Тип
+        <select class="step-kind">
+          <option value="field">вопрос с ответом</option>
+          <option value="confirm">да/нет</option>
+          <option value="info">только текст</option>
+        </select>
+      </label>
+      <label>Извлечение
+        <select class="step-extractor">
+          <option value="plain">как есть</option>
+          <option value="fio">ФИО</option>
+          <option value="birth">дата</option>
+          <option value="yesno">да/нет</option>
+          <option value="none">не сохранять</option>
+        </select>
+      </label>
+    </div>
+    <textarea class="step-statement" placeholder="Текст для зачитывания (разъяснение, опционально)">${step.statement || ""}</textarea>
+    <textarea class="step-question" placeholder="Вопрос (если нужен ответ)">${step.question || ""}</textarea>
+  `;
+  row.querySelector(".step-kind").value = step.kind || "field";
+  row.querySelector(".step-extractor").value = step.extractor || "plain";
+  row.dataset.key = step.key || ("step" + Math.random().toString(36).slice(2, 8));
+  row.querySelector(".step-remove").onclick = () => row.remove();
+  row.querySelector(".step-up").onclick = () => {
+    const prev = row.previousElementSibling;
+    if (prev) row.parentNode.insertBefore(row, prev);
+  };
+  row.querySelector(".step-down").onclick = () => {
+    const next = row.nextElementSibling;
+    if (next) row.parentNode.insertBefore(next, row);
+  };
+  return row;
+}
+
+function escAttr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+async function openTemplateEditor(templateId) {
+  state.editingTemplateId = templateId;
+  const stepsBox = $("templateSteps");
+  stepsBox.innerHTML = "";
+  $("templateHint").textContent = "";
+  let tmpl = { name: "", description: "", steps: [], is_builtin: false };
+  if (templateId) {
+    tmpl = await fetch(`${HTTP}/api/templates/${templateId}`).then((x) => x.json());
+  }
+  $("templateModalTitle").textContent = templateId
+    ? (tmpl.is_builtin ? "Копия шаблона «" + tmpl.name + "»" : "Редактировать шаблон")
+    : "Новый шаблон";
+  // Стандартный шаблон нельзя менять напрямую — открываем его как заготовку для копии.
+  if (tmpl.is_builtin) {
+    state.editingTemplateId = null;
+    tmpl = { ...tmpl, name: tmpl.name + " — копия" };
+    $("templateHint").textContent = "Стандартный шаблон нельзя изменить напрямую — сохранение создаст новую копию.";
+  }
+  $("templateName").value = tmpl.name || "";
+  $("templateDescription").value = tmpl.description || "";
+  (tmpl.steps || []).forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
+  $("templateDeleteBtn").hidden = !state.editingTemplateId;
+  $("templateModal").hidden = false;
+}
+
+function slugify(label, fallback) {
+  const s = label.trim().toLowerCase()
+    .replace(/[^a-zа-яё0-9]+/gi, "_").replace(/^_+|_+$/g, "");
+  return s || fallback;
+}
+
+function collectStepsFromEditor() {
+  const rows = [...$("templateSteps").querySelectorAll(".step-row")];
+  const used = new Set();
+  return rows.map((row, i) => {
+    const label = row.querySelector(".step-label").value.trim() || `Шаг ${i + 1}`;
+    let key = slugify(label, row.dataset.key || `step${i}`);
+    while (used.has(key)) key += "_2";
+    used.add(key);
+    return {
+      key, label,
+      kind: row.querySelector(".step-kind").value,
+      extractor: row.querySelector(".step-extractor").value,
+      statement: row.querySelector(".step-statement").value.trim(),
+      question: row.querySelector(".step-question").value.trim(),
+    };
+  });
+}
+
+async function saveTemplate() {
+  const name = $("templateName").value.trim();
+  if (!name) { $("templateHint").textContent = "Укажите название шаблона."; return; }
+  const steps = collectStepsFromEditor();
+  if (!steps.length) { $("templateHint").textContent = "Добавьте хотя бы один шаг."; return; }
+  const body = JSON.stringify({ name, description: $("templateDescription").value.trim(), steps });
+  const url = state.editingTemplateId
+    ? `${HTTP}/api/templates/${state.editingTemplateId}` : `${HTTP}/api/templates`;
+  const method = state.editingTemplateId ? "PUT" : "POST";
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body });
+  const data = await r.json();
+  if (!r.ok) { $("templateHint").textContent = data.error || "Не удалось сохранить шаблон."; return; }
+  $("templateModal").hidden = true;
+  await loadTemplates();
+  $("templateSelect").value = data.id;
+  state.templateId = data.id;
+}
+
+async function deleteTemplateConfirm() {
+  if (!state.editingTemplateId) { $("templateModal").hidden = true; return; }
+  if (!confirm("Удалить этот шаблон анкеты?")) return;
+  const r = await fetch(`${HTTP}/api/templates/${state.editingTemplateId}`, { method: "DELETE" });
+  const data = await r.json();
+  if (!r.ok) { $("templateHint").textContent = data.error || "Не удалось удалить шаблон."; return; }
+  $("templateModal").hidden = true;
+  await loadTemplates();
+}
+
 async function confirmAnswer() {
+  hideAutoBoxes();
+  stopAutoListening();
   const answer = $("answerInput").value.trim();
   if (!answer) return;
   const r = await fetch(`${HTTP}/api/assistant/answer`, {
@@ -113,6 +422,8 @@ let answerRec = null;
 async function toggleRecordAnswer() {
   const btn = $("recordAnswer");
   if (!answerRec) {
+    hideAutoBoxes();
+    stopAutoListening();   // ручная запись — приоритет над автослушанием, если оно ещё идёт
     answerRec = new window.AudioCapture.OneShotRecorder($("mic1").value);
     await answerRec.start();
     btn.textContent = "⏹ Остановить";
@@ -141,12 +452,13 @@ function renderFields(fields) {
   });
 }
 
-// ---------- Протокол: стриминг ----------
+// ---------- Протокол: стриминг (Блок 2 — partial/stable/final) ----------
 function startRecording() {
   state.ws = new WebSocket(`${WS}/ws/stream/${SESSION}`);
   state.ws.binaryType = "arraybuffer";
   state.ws.onopen = async () => {
-    state.ws.send(JSON.stringify({ type: "start" }));
+    // Сессия создаётся сервером автоматически при подключении к сокету — отдельный
+    // "start"-сигнал не нужен (сервер его и не обрабатывает).
     const mics = [
       { ch: 0, dev: $("mic0").value },
       { ch: 1, dev: $("mic1").value },
@@ -158,12 +470,24 @@ function startRecording() {
       state.captures.push(cap);
     }
     state.recording = true;
+    state.flushed = true;
     $("startRec").disabled = true;
     $("stopRec").disabled = false;
+    updateModelSelectEnabled();
   };
   state.ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === "segment") addSegment(msg);
+    if (msg.type === "asr_update" || msg.type === "asr_partial") {
+      updateLiveSegment(msg);
+    } else if (msg.type === "asr_final") {
+      finalizeLiveSegment(msg);
+    } else if (msg.type === "segment_update") {
+      applyBleedFlag(msg);
+    } else if (msg.type === "stopped") {
+      state.flushed = true;
+      $("finalizeBtn").disabled = false;
+      $("saveBtn").disabled = false;
+    }
   };
 }
 
@@ -171,15 +495,72 @@ function stopRecording() {
   state.captures.forEach((c) => c.stop());
   state.captures = [];
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    // До прихода "stopped" хвостовые реплики ещё не гарантированно долетели — блокируем
+    // финализацию/сохранение, чтобы не потерять последние секунды разговора в протоколе.
+    state.flushed = false;
+    $("finalizeBtn").disabled = true;
+    $("saveBtn").disabled = true;
     state.ws.send(JSON.stringify({ type: "stop" }));
   }
   state.recording = false;
   $("startRec").disabled = false;
   $("stopRec").disabled = true;
+  updateModelSelectEnabled();
 }
 
 function speakerClass(ch) {
   return ch === 0 ? "ch0" : ch === 1 ? "ch1" : "auto";
+}
+
+// ---------- "живой" сегмент: partial/update (ещё не финализирован) ----------
+function updateLiveSegment(msg) {
+  const key = String(msg.channel);
+  let live = state.liveSegments.get(key);
+  if (!live || live.utteranceId !== msg.utterance_id) {
+    if (live) live.el.remove();   // прошлая реплика этого канала не дождалась финала — убираем
+    live = createLiveSegment(msg.channel, msg.utterance_id);
+    state.liveSegments.set(key, live);
+  }
+  renderLiveText(live, msg.text || "", msg.stable_word_count || 0);
+}
+
+function createLiveSegment(channel, utteranceId) {
+  const wrap = document.createElement("div");
+  wrap.className = "segment segment-live";
+  const sp = document.createElement("div");
+  sp.className = "seg-speaker " + speakerClass(channel);
+  sp.textContent = "…";
+  const body = document.createElement("div");
+  body.className = "seg-body";
+  const txt = document.createElement("div");
+  txt.className = "seg-text";
+  body.appendChild(txt);
+  wrap.appendChild(sp);
+  wrap.appendChild(body);
+  $("transcript").appendChild(wrap);
+  $("transcript").scrollTop = $("transcript").scrollHeight;
+  return { el: wrap, txtEl: txt, channel, utteranceId };
+}
+
+function renderLiveText(live, text, stableWordCount) {
+  live.txtEl.innerHTML = "";
+  text.split(/\s+/).filter(Boolean).forEach((w, i) => {
+    const span = document.createElement("span");
+    span.className = "word " + (i < stableWordCount ? "stable" : "fluid");
+    span.textContent = (i > 0 ? " " : "") + w;
+    live.txtEl.appendChild(span);
+  });
+  $("transcript").scrollTop = $("transcript").scrollHeight;
+}
+
+function finalizeLiveSegment(msg) {
+  const key = String(msg.channel);
+  const live = state.liveSegments.get(key);
+  if (live && live.utteranceId === msg.utterance_id) {
+    live.el.remove();
+    state.liveSegments.delete(key);
+  }
+  if (msg.text && msg.id) addSegment(msg);
 }
 
 function addSegment(seg) {
@@ -192,6 +573,18 @@ function addSegment(seg) {
   sp.textContent = seg.speaker + ":";
   sp.title = "Клик — изменить метку голоса";
   sp.onclick = () => openSpeakerModal(seg.channel);
+
+  if (seg.likely_bleed) {
+    wrap.classList.add("segment-bleed");
+    const flag = document.createElement("span");
+    flag.className = "bleed-flag";
+    flag.title = "Похоже на протёкший голос другого канала (совпадает с репликой на другом " +
+      "канале примерно в то же время) — авто-решение не принято, проверьте вручную.";
+    flag.textContent = "⚠ вероятный дубль";
+    flag.onclick = (ev) => { ev.stopPropagation(); wrap.classList.toggle("collapsed"); };
+    sp.appendChild(document.createElement("br"));
+    sp.appendChild(flag);
+  }
 
   const body = document.createElement("div");
   body.className = "seg-body";
@@ -217,6 +610,12 @@ function addSegment(seg) {
   const meta = document.createElement("div");
   meta.className = "seg-meta";
   meta.textContent = `${fmt(seg.start)}–${fmt(seg.end)}`;
+  if (seg.aligned) {
+    const tag = document.createElement("span");
+    tag.textContent = "  · ✓ тайм-коды уточнены";
+    tag.style.color = "#2f8a57";
+    meta.appendChild(tag);
+  }
 
   body.appendChild(txt);
   body.appendChild(meta);
@@ -226,6 +625,21 @@ function addSegment(seg) {
   $("transcript").scrollTop = $("transcript").scrollHeight;
 
   state.segments.set(seg.id, { el: wrap, speakerEl: sp, channel: seg.channel, words, meta });
+}
+
+function applyBleedFlag(seg) {
+  // Сегмент уже был отрисован раньше как обычный, но пост-ASR дедупликация (Блок 3.7) задним
+  // числом распознала его как вероятный дубль протёкшего голоса — досвечиваем на месте.
+  const s = state.segments.get(seg.id);
+  if (!s || s.el.classList.contains("segment-bleed")) return;
+  s.el.classList.add("segment-bleed");
+  const flag = document.createElement("span");
+  flag.className = "bleed-flag";
+  flag.title = "Похоже на протёкший голос другого канала — проверьте вручную.";
+  flag.textContent = "⚠ вероятный дубль";
+  flag.onclick = (ev) => { ev.stopPropagation(); s.el.classList.toggle("collapsed"); };
+  s.speakerEl.appendChild(document.createElement("br"));
+  s.speakerEl.appendChild(flag);
 }
 
 async function saveEdit(id, txtEl, wrap) {
@@ -242,6 +656,45 @@ async function saveEdit(id, txtEl, wrap) {
       tag.textContent = "  · ред.";
       s.meta.appendChild(tag);
     }
+  }
+}
+
+// ---------- Финализация: уточнение тайм-кодов (forced alignment) ----------
+function renderProtocol(protocol) {
+  $("transcript").innerHTML = "";
+  state.segments.clear();
+  (protocol.segments || []).forEach(addSegment);
+}
+
+async function finalizeTimecodes() {
+  const btn = $("finalizeBtn");
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = "⏳ Обработка…";
+  const diarize = $("diarizeChk").checked;
+  const num = parseInt($("numSpeakers").value, 10) || 0;
+  try {
+    const r = await fetch(`${HTTP}/api/finalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: SESSION, align: true, diarize,
+        num_speakers: num > 0 ? num : null,
+      }),
+    }).then((x) => x.json());
+    if (r.error) {
+      alert("Ошибка финализации: " + r.error);
+    } else {
+      renderProtocol(r.protocol);
+      await loadAudio();
+      const parts = [`тайм-коды: ${r.aligned_segments ?? 0} сегм.`];
+      if (diarize) parts.push(`голосов найдено: ${r.speakers ?? "?"}`);
+      alert("Готово — " + parts.join(", "));
+    }
+  } catch (e) {
+    alert("Ошибка: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
   }
 }
 
@@ -301,6 +754,7 @@ function bind() {
   $("recordAnswer").onclick = toggleRecordAnswer;
   $("startRec").onclick = startRecording;
   $("stopRec").onclick = stopRecording;
+  $("finalizeBtn").onclick = finalizeTimecodes;
   $("saveBtn").onclick = () =>
     fetch(`${HTTP}/api/save`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -308,6 +762,7 @@ function bind() {
     }).then(() => alert("Протокол сохранён на сервере."));
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
+  $("modelSelect").onchange = onModelChange;
   $("audio").addEventListener("timeupdate", onTimeUpdate);
 
   $("speakerCancel").onclick = () => ($("speakerModal").hidden = true);
@@ -315,8 +770,22 @@ function bind() {
   document.querySelectorAll("#speakerModal .presets button").forEach((b) => {
     b.onclick = () => applySpeaker(b.dataset.v);
   });
+
+  $("templateSelect").onchange = () => { state.templateId = $("templateSelect").value || null; };
+  $("newTemplateBtn").onclick = () => openTemplateEditor(null);
+  $("editTemplateBtn").onclick = () => {
+    if (state.templateId) openTemplateEditor(state.templateId);
+  };
+  $("addStepBtn").onclick = () => {
+    $("templateSteps").appendChild(stepRowTemplate({ kind: "field" }));
+  };
+  $("templateCancel").onclick = () => ($("templateModal").hidden = true);
+  $("templateSaveBtn").onclick = saveTemplate;
+  $("templateDeleteBtn").onclick = deleteTemplateConfirm;
 }
 
 bind();
 checkHealth();
 loadMics();
+loadModels();
+loadTemplates();

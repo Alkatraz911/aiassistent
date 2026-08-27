@@ -36,6 +36,9 @@ button.rec { background: #c5384a; }
 button.stop { background: #6b7488; }
 .row { display: flex; gap: 8px; margin-top: 8px; }
 
+.template-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.template-row select { flex: 1; padding: 5px; }
+
 .assistant { background: #fff; border: 1px solid #dde3ee; border-radius: 10px; padding: 14px; }
 .assistant-prompt {
   font-size: 15px; line-height: 1.5; min-height: 24px; margin: 8px 0;
@@ -47,6 +50,22 @@ button.stop { background: #6b7488; }
   padding: 8px; font-size: 14px; resize: vertical;
 }
 
+/* Блок 6: автозапись ответа анкеты по паузам */
+.auto-listen {
+  display: flex; align-items: center; gap: 8px; padding: 10px; margin-bottom: 10px;
+  background: #fff6e0; border: 1px solid #f0cf8a; border-radius: 8px; font-size: 13px; color: #6b5a1e;
+}
+.auto-listen-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: #c5384a; flex-shrink: 0;
+  animation: auto-listen-pulse 1.1s ease-in-out infinite;
+}
+@keyframes auto-listen-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.auto-confirm {
+  padding: 10px; margin-bottom: 10px; background: #eef9f0; border: 1px solid #a9dbb4;
+  border-radius: 8px;
+}
+.auto-confirm-text { font-size: 14px; font-weight: 500; margin: 4px 0 8px; }
+
 table.fields { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.fields td { padding: 6px 8px; border-bottom: 1px solid #e7ebf3; vertical-align: top; }
 table.fields td.k { color: #66718c; width: 42%; }
@@ -57,6 +76,8 @@ td.v.filled { color: #1f7a45; }
 .rec-controls { display: flex; gap: 8px; }
 .player { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
 .player audio { height: 34px; }
+.finalize-opts { display: flex; gap: 18px; align-items: center; font-size: 12px; color: #54607a; margin-bottom: 8px; }
+.finalize-opts label { display: flex; gap: 6px; align-items: center; }
 
 .transcript { flex: 1; overflow-y: auto; padding: 8px 0; }
 .segment {
@@ -82,6 +103,22 @@ td.v.filled { color: #1f7a45; }
 .seg-meta { font-size: 11px; color: #97a0b5; margin-top: 3px; }
 .seg-meta .edited { color: #b5732a; }
 
+/* «живой» сегмент (Блок 2: partial/stable/final) — текст ещё может дописаться/перезаписаться */
+.segment.segment-live { background: #f0f4fd; border-style: dashed; border-color: #c3cfe8; }
+.segment-live .seg-text .word { cursor: default; }
+.segment-live .seg-text .word.stable { color: #1c2230; }
+.segment-live .seg-text .word.fluid { color: #8a93a8; font-style: italic; }
+
+/* Вероятный дубль протёкшего голоса (Блок 3.7) — приглушаем, НЕ скрываем; ничего не решаем
+   автоматически за оператора. Сворачивание — только вручную, кликом по флажку. */
+.segment.segment-bleed { opacity: .55; }
+.segment.segment-bleed:hover { opacity: .9; }
+.bleed-flag {
+  display: inline-block; font-size: 10px; font-weight: 400; color: #a5374a; cursor: pointer;
+  margin-top: 2px;
+}
+.segment.segment-bleed.collapsed .seg-body { display: none; }
+
 .modal {
   position: fixed; inset: 0; background: #1c223066; display: flex;
   align-items: center; justify-content: center; z-index: 50;
@@ -90,3 +127,21 @@ td.v.filled { color: #1f7a45; }
 .modal-card .presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .modal-card .presets button { background: #e3e8f2; color: #2b3550; }
 .modal-card input { width: 100%; padding: 8px; border: 1px solid #cfd6e4; border-radius: 7px; margin-bottom: 10px; }
+
+.modal-card-wide { width: 640px; max-height: 84vh; overflow-y: auto; }
+.template-steps { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.step-row {
+  border: 1px solid #dde3ee; border-radius: 8px; padding: 10px; background: #f7f9fc;
+}
+.step-row .step-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.step-row .step-head input.step-label { flex: 1; margin-bottom: 0; }
+.step-row select.step-kind, .step-row select.step-extractor { padding: 4px; }
+.step-row textarea {
+  width: 100%; min-height: 44px; border: 1px solid #cfd6e4; border-radius: 6px;
+  padding: 6px; font-size: 13px; resize: vertical; margin-bottom: 6px;
+}
+.step-row .step-order { display: flex; flex-direction: column; gap: 2px; }
+.step-row .step-order button { padding: 2px 6px; font-size: 11px; background: #e3e8f2; color: #2b3550; }
+.step-row .step-remove { background: transparent; color: #a5374a; padding: 4px 8px; }
+.step-row .step-meta { display: flex; gap: 8px; font-size: 12px; color: #66718c; margin-bottom: 6px; }
+.step-row .step-meta label { display: flex; align-items: center; gap: 4px; }

@@ -22,7 +22,14 @@ _PHRASES = [
 
 
 class StubASR(ASRProvider):
-    def transcribe(self, audio: np.ndarray, sample_rate: int) -> ASRResult:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        *,
+        beam_size: int | None = None,
+        initial_prompt: str | None = None,
+    ) -> ASRResult:
         dur = max(0.4, len(audio) / sample_rate)
         # тихий фрагмент считаем тишиной
         if float(np.sqrt(np.mean(audio ** 2)) if len(audio) else 0.0) < 1e-4:

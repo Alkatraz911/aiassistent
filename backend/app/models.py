@@ -47,7 +47,24 @@ class Segment(BaseModel):
     text_original: str = ""               # исходная расшифровка ASR (неизменяема)
     words: list[Word] = Field(default_factory=list)
     edited: bool = False
+    aligned: bool = False                 # тайм-коды уточнены forced-alignment
     edits: list[Edit] = Field(default_factory=list)
+    # Кросс-ток (Блок 3.7): средний own-SNR канала за время реплики (для пост-ASR сравнения),
+    # и пометка «вероятный дубль протёкшего голоса» — НЕ удаляется, только приглушается в UI,
+    # решение остаётся за оператором (тот же принцип, что и audit-слой `Edit`).
+    own_snr_db: float = 0.0
+    likely_bleed: bool = False
+    bleed_score: float = 0.0
+
+    def to_ws_dict(self) -> dict:
+        """Представление сегмента для WS-сообщений `segment`/`asr_final` — единая точка,
+        чтобы формат не расходился между live-стримингом и остальными местами отправки."""
+        return {
+            "id": self.id, "channel": self.channel, "speaker": self.speaker,
+            "speaker_auto": self.speaker_auto, "start": self.start, "end": self.end,
+            "text": self.text, "likely_bleed": self.likely_bleed, "bleed_score": self.bleed_score,
+            "words": [{"text": w.text, "start": w.start, "end": w.end} for w in self.words],
+        }
 
 
 class QuestionnaireField(BaseModel):
@@ -56,6 +73,41 @@ class QuestionnaireField(BaseModel):
     label: str
     value: str = ""
     confirmed: bool = False
+
+
+class TemplateStep(BaseModel):
+    """Один шаг анкеты внутри шаблона (Блок 5)."""
+    key: str
+    label: str
+    kind: Literal["field", "confirm", "info"] = "field"
+    statement: str = ""     # текст для зачитывания (разъяснение, опционально)
+    question: str = ""      # вопрос, требующий ответа (для field/confirm)
+    extractor: str = "plain"    # ключ из EXTRACTORS (questionnaire.py): fio/birth/yesno/plain/none
+
+
+class Template(BaseModel):
+    """Именованный шаблон анкеты — пользователь может завести несколько под разные сценарии
+    опроса (Блок 5). `is_builtin` — неизменяемый и неудаляемый сид, редактируется только через
+    копию. `version` растёт при каждом сохранении — `Protocol.template_snapshot` фиксирует
+    формулировки вопросов ровно на момент прохождения анкеты, даже если шаблон потом изменят."""
+    id: str = Field(default_factory=_id)
+    name: str
+    description: str = ""
+    is_builtin: bool = False
+    version: int = 1
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
+    steps: list[TemplateStep] = Field(default_factory=list)
+
+
+class TemplateSummary(BaseModel):
+    """Облегчённое представление шаблона для списка (без шагов)."""
+    id: str
+    name: str
+    description: str = ""
+    is_builtin: bool = False
+    step_count: int = 0
+    updated_at: float = 0.0
 
 
 class Protocol(BaseModel):
@@ -68,3 +120,14 @@ class Protocol(BaseModel):
     # Соответствие канал -> метка спикера, заданное интервьюером
     speaker_map: dict[int, str] = Field(default_factory=dict)
     audio_path: Optional[str] = None
+    # Снапшот модели ASR, использованной в этой сессии (Блок 4) — активная модель могла
+    # смениться в UI после записи, поэтому протокол хранит именно ту, что реально распознавала.
+    asr_model: Optional[str] = None
+    asr_device: Optional[str] = None
+    asr_compute: Optional[str] = None
+    # Снапшот шаблона анкеты (Блок 5) — id/имя для ссылки + полная копия шагов на момент старта
+    # анкеты, чтобы последующее редактирование шаблона не искажало историю уже пройденных сессий.
+    template_id: Optional[str] = None
+    template_name: Optional[str] = None
+    template_version: Optional[int] = None
+    template_snapshot: Optional[Template] = None
