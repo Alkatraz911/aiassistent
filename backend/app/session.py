@@ -23,7 +23,8 @@ import numpy as np
 
 from . import config, telemetry
 from .asr import get_asr
-from .asr.base import ASRWord
+from .asr.base import (ASRWord, has_repeating_ngram, looks_like_known_hallucination,
+                       looks_like_prompt_echo)
 from .asr.local_agreement import UtteranceHypothesis
 from .asr.model_manager import ModelKey, ModelManager
 from .asr.scheduler import AsrJob, AsrScheduler, PRIORITY_FINAL, PRIORITY_ONESHOT, PRIORITY_PARTIAL
@@ -359,6 +360,19 @@ class Session:
         пауза между кликами) всплыла бы в уже новой записи, которую видит пользователь сейчас."""
         all_words = hyp.committed_words + tail_words
         text = UtteranceHypothesis.finalize_text(all_words)
+
+        # Последний рубеж перед протоколом. Провайдер фильтрует то, что выдала модель за один
+        # проход, а сюда текст приходит СОБРАННЫМ из слов, закоммиченных партиалами, плюс хвост
+        # финала, и потом ещё подрезанным по границе — то есть это уже другая строка. Реальный
+        # случай с живой записи: партиал выдал «Это опрос.» — не эхо промпта, слова «это» в
+        # промпте нет, фильтр провайдера пропустил, — LocalAgreement закоммитил слова, а после
+        # подрезки в сегменте осталось голое «опрос.», то есть чистое эхо. Проверяем ровно то,
+        # что пойдёт в протокол.
+        if text and (has_repeating_ngram(text)
+                     or looks_like_prompt_echo(text, config.WHISPER_PROMPT)
+                     or looks_like_known_hallucination(text)):
+            text = ""
+
         is_current_epoch = (epoch == self.stream_epoch)
 
         msg = {"type": "asr_final", "channel": channel, "utterance_id": hyp.utterance_id, "text": text}

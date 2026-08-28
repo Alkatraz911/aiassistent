@@ -10,7 +10,8 @@ from __future__ import annotations
 import numpy as np
 
 from .. import config
-from .base import ASRProvider, ASRResult, ASRWord, has_repeating_ngram
+from .base import (ASRProvider, ASRResult, ASRWord, has_repeating_ngram,
+                   looks_like_known_hallucination, looks_like_prompt_echo)
 
 
 class FasterWhisperASR(ASRProvider):
@@ -67,6 +68,8 @@ class FasterWhisperASR(ASRProvider):
             if peak > 1e-4:
                 audio = (audio * (0.95 / peak)).astype(np.float32)
 
+        prompt = (initial_prompt if initial_prompt is not None
+                  else (config.WHISPER_PROMPT or None))
         segments, info = self._decode(
             audio,
             language=config.WHISPER_LANGUAGE,
@@ -88,8 +91,7 @@ class FasterWhisperASR(ASRProvider):
             # «Редактор субтитров...») — подавляет декодирование сегментов, идущих сразу за
             # тишиной длиннее порога, вместо того чтобы пытаться что-то там расслышать.
             hallucination_silence_threshold=config.WHISPER_HALLUCINATION_SILENCE_S,
-            initial_prompt=(initial_prompt if initial_prompt is not None
-                             else (config.WHISPER_PROMPT or None)),
+            initial_prompt=prompt,
         )
 
         words: list[ASRWord] = []
@@ -110,7 +112,24 @@ class FasterWhisperASR(ASRProvider):
         # Здесь — фактическая проверка результата, а не догадка на входе: если текст выглядит как
         # зацикленный повтор, считаем это тем же, что и «речь не распознана» (пустой результат),
         # а не пропускаем в протокол.
-        if has_repeating_ngram(text):
+        # Три независимых пост-фильтра, каждый ловит свой класс галлюцинаций, который не
+        # ловится ни порогами уверенности, ни VAD (все три случая наблюдались на реальных
+        # записях — подробности в докстрингах в base.py):
+        #   • зацикливание («Ветка. Ветка. Ветка...»),
+        #   • эхо самого initial_prompt на не-речи (самый частый),
+        #   • заученные титры YouTube («Редактор субтитров...», «Субтитры сделал ...»).
+        # Во всех трёх случаях результат приравнивается к «речь не распознана»: сегмент не
+        # создаётся. Фонограмма при этом пишется всегда — потерять звук нельзя, а вот пустить
+        # выдуманную фразу в протокол опроса нельзя тем более.
+        # Сравниваем с СТАТИЧЕСКИМ промптом, а не с тем, что реально ушло в модель. В живой
+        # сессии `initial_prompt` — это config.WHISPER_PROMPT плюс последние распознанные слова
+        # канала (Session._build_prompt), и проверять эхо по нему нельзя: в допросе опрашиваемый
+        # постоянно повторяет формулировку вопроса («Были ли вы там пятнадцатого марта?» — «Был
+        # там пятнадцатого марта»), и такая — совершенно настоящая — реплика оказалась бы
+        # подпоследовательностью недавнего контекста и была бы выброшена. Эхо же приходит именно
+        # от неизменной доменной подсказки: продолжать на не-речи декодеру больше нечего.
+        if (has_repeating_ngram(text) or looks_like_prompt_echo(text, config.WHISPER_PROMPT)
+                or looks_like_known_hallucination(text)):
             return ASRResult(text="", words=[], language=info.language)
 
         return ASRResult(text=text, words=words, language=info.language)
@@ -119,9 +138,10 @@ class FasterWhisperASR(ASRProvider):
         """Один проход декодирования: обычный или батчевый.
 
         Батчевый (`BatchedInferencePipeline`) режет аудио по VAD и считает получившиеся куски
-        ОДНИМ батчем. Выигрыш на GPU растёт с длиной куска (замер: 1.2x на 10с, до 2.3x на 77с) —
-        чем больше сегментов, тем плотнее заполнен батч. На коротком куске батчить нечего,
-        поэтому порог `ASR_BATCH_MIN_S`; на CPU выигрыша нет вовсе — ядра и так загружены.
+        ОДНИМ батчем: 1.2x на 10с, до 2.3x на 77с. По умолчанию ВЫКЛЮЧЕН — он молча выбрасывает
+        `hallucination_silence_threshold` и лестницу температур (обоснование в config.py,
+        `ASR_BATCH_ENABLED`). Порог `ASR_BATCH_MIN_S` — потому что на коротком куске батчить
+        нечего; на CPU выигрыша нет вовсе.
 
         Набор параметров у обоих путей одинаковый (в faster-whisper 1.1.0 батчевый
         `transcribe()` отличается только дополнительным `batch_size`), поэтому защиты от
@@ -144,6 +164,10 @@ class FasterWhisperASR(ASRProvider):
         `ModelManager.acquire`, где параллельная загрузка ОДНОЙ модели реально ломалась."""
         if self._batched is None:
             from faster_whisper import BatchedInferencePipeline
+            print("[asr] ВНИМАНИЕ: включён ASR_BATCH_ENABLED — для кусков длиннее "
+                  f"{config.ASR_BATCH_MIN_S:.0f}с перестают действовать "
+                  "hallucination_silence_threshold и лестница температур "
+                  "(ограничение faster-whisper, см. config.py)")
             self._batched = BatchedInferencePipeline(model=self.model)
         return self._batched
 

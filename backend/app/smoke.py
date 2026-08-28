@@ -105,6 +105,57 @@ def test_repetition_hallucination_filter() -> None:
     print("REPETITION_HALLUCINATION_FILTER OK ✅")
 
 
+def test_prompt_echo_filter() -> None:
+    """Самый частый вид галлюцинации на реальных записях — модель отдаёт обратно сам
+    `WHISPER_PROMPT`, когда распознавать нечего (тишина, шум, обрывок). Порогами уверенности не
+    ловится: эхо промпта модель выдаёт УВЕРЕННО. Все «галлюцинации» ниже — дословно из протокола
+    живой 107-секундной записи; крупные модели (large-v3) эхают заметно чаще мелких."""
+    from .asr.base import looks_like_known_hallucination, looks_like_prompt_echo
+    from . import config
+
+    prompt = config.WHISPER_PROMPT
+    echoes = [
+        "Интервьюер и опрашиваемый. Разговорная русская речь.",   # промпт целиком
+        "русская речь.",                                          # хвост промпта
+        "Интервьюер.",                                            # одно слово из промпта
+        "опросы.",                          # слово промпта в другой форме («опроса»)
+        "Интервьюер и опрашиваемый. Разговорная речь.",   # эхо с выпавшим словом
+    ]
+    credits = [
+        "Редактор субтитров И .Бойкова",
+        "Субтитры сделал DimaTorzok",
+        "Корректор А .Егорова",
+        "Продолжение следует...",
+    ]
+    normal = [
+        "Иванов Сергей Петрович, тысяча девятьсот восемьдесят четвёртого года рождения",
+        "Моя машинка разноцветная.",
+        "Разговаривай в микрофон. Не надо так близко. Просто держи и говори.",
+        "Миша, ты что делаешь?",
+        # Реплика про сам протокол — из слов промпта, но НЕ в его порядке и с чужими словами.
+        "Я прочитал протокол и всё подтверждаю",
+    ]
+    for text in echoes:
+        assert looks_like_prompt_echo(text, prompt), f"должно ловиться как эхо промпта: {text!r}"
+    for text in credits:
+        assert looks_like_known_hallucination(text), f"должно ловиться как титры: {text!r}"
+    for text in normal:
+        assert not looks_like_prompt_echo(text, prompt), f"не должно ложно резаться: {text!r}"
+        assert not looks_like_known_hallucination(text), f"не должно ложно резаться: {text!r}"
+    # Почему сравнивать надо со СТАТИЧЕСКИМ промптом, а не с тем, что реально уходит в модель:
+    # в живой сессии initial_prompt = WHISPER_PROMPT + последние распознанные слова канала
+    # (Session._build_prompt). Опрашиваемый постоянно повторяет формулировку вопроса — по
+    # динамическому промпту такая настоящая реплика выглядела бы эхом и была бы выброшена.
+    dynamic = prompt + " Вы были там пятнадцатого марта вечером"
+    repeat_of_question = "там пятнадцатого марта вечером"
+    assert looks_like_prompt_echo(repeat_of_question, dynamic), (
+        "сценарий: по динамическому промпту повтор вопроса действительно выглядит эхом — "
+        "именно поэтому провайдер сравнивает со статическим")
+    assert not looks_like_prompt_echo(repeat_of_question, prompt), (
+        "по статическому промпту повтор вопроса эхом быть НЕ должен — иначе режем живую речь")
+    print("PROMPT_ECHO_FILTER OK ✅")
+
+
 def test_crosstalk_state_reset_across_cycles() -> None:
     """Регрессия: `CrossTalkScorer` держал `_loud_since` между заходами записи. Если предыдущий
     цикл заканчивался ровно в момент «канал 0 громче канала 1», метка оставалась в словаре
@@ -219,6 +270,8 @@ def main() -> None:
 
     print("\n--- фильтр повторяющихся галлюцинаций ---")
     test_repetition_hallucination_filter()
+    print("\n--- эхо initial_prompt и заученные титры ---")
+    test_prompt_echo_filter()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")
     test_crosstalk_state_reset_across_cycles()
