@@ -156,6 +156,28 @@ def test_prompt_echo_filter() -> None:
     print("PROMPT_ECHO_FILTER OK ✅")
 
 
+def test_prompt_has_no_recent_speech() -> None:
+    """В `initial_prompt` не должно попадать недавно распознанное.
+
+    Раньше туда безусловно дописывались последние 60 слов канала — «дадим модели контекст». На
+    живой записи это давало обратный эффект: на фоновом шуме модель возвращала этот контекст
+    ДОСЛОВНО, и в протокол шли повторы предыдущих вопросов с новыми тайм-кодами («Миша, сколько
+    тебе лет?» четыре раза подряд). Замер на тихих окнах: с контекстом в промпте модель выдавала
+    прошлые реплики, с одним доменным промптом — пустоту. Фильтром по тексту это неотличимо от
+    настоящего повтора (в допросе вопрос повторяют постоянно), поэтому проверяем сам промпт."""
+    from . import config
+
+    s = manager.create("smoke-prompt")
+    s._remember_prompt(0, "Миша, сколько тебе лет?")
+    s._remember_prompt(0, "Я вам обещала.")
+    prompt = s._build_prompt(0)
+    assert prompt == (config.WHISPER_PROMPT or "").strip(), (
+        f"промпт должен содержать только доменную подсказку, а содержит: {prompt!r}")
+    for phrase in ("Миша", "обещала"):
+        assert phrase not in prompt, f"недавняя речь просочилась в промпт: {phrase!r}"
+    print("PROMPT_NO_RECENT_SPEECH OK ✅")
+
+
 def test_crosstalk_state_reset_across_cycles() -> None:
     """Регрессия: `CrossTalkScorer` держал `_loud_since` между заходами записи. Если предыдущий
     цикл заканчивался ровно в момент «канал 0 громче канала 1», метка оставалась в словаре
@@ -272,6 +294,7 @@ def main() -> None:
     test_repetition_hallucination_filter()
     print("\n--- эхо initial_prompt и заученные титры ---")
     test_prompt_echo_filter()
+    test_prompt_has_no_recent_speech()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")
     test_crosstalk_state_reset_across_cycles()

@@ -149,13 +149,27 @@ class Session:
 
     # --- контекст для ASR (initial_prompt) --------------------------------
     def _remember_prompt(self, channel: int, text: str) -> None:
+        """Копит недавно распознанное для контекста. При ASR_PROMPT_RECENT_WORDS=0 (дефолт)
+        не копит ничего — см. `_build_prompt`."""
+        keep = config.ASR_PROMPT_RECENT_WORDS
+        if keep <= 0:
+            return
         words = (self._recent_prompt.get(channel, "") + " " + text).split()
-        self._recent_prompt[channel] = " ".join(words[-60:])
+        self._recent_prompt[channel] = " ".join(words[-keep:])
 
     def _build_prompt(self, channel: int) -> str:
+        """Промпт для ASR. По умолчанию — ТОЛЬКО доменная подсказка, без недавних реплик.
+
+        Дописывание недавнего текста выглядит бесплатным улучшением («дадим модели контекст»), но
+        на реальной записи оно давало обратный эффект: на фоновом шуме модель возвращала этот
+        контекст дословно, и в протокол шли повторы предыдущих вопросов с новыми тайм-кодами
+        (замер и цифры — в config.py, ASR_PROMPT_RECENT_WORDS). Отличить такой повтор по тексту
+        от настоящего нельзя — в допросе опрашиваемый и правда повторяет вопрос, — поэтому
+        единственное честное место для лечения здесь: не подсовывать модели то, что она потом
+        выдаст за распознанное."""
         base = config.WHISPER_PROMPT or ""
         recent = self._recent_prompt.get(channel, "")
-        return (base + " " + recent).strip()
+        return (base + " " + recent).strip() if recent else base.strip()
 
     # --- real-time streaming ASR (Блок 2) ---------------------------------
     def ingest_streaming(self, channel: int, pcm_int16: np.ndarray) -> None:
