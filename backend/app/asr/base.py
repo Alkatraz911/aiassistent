@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -68,18 +69,29 @@ _CREDIT_MARKERS = (
     "продолжение следует",
     "спасибо за просмотр",
     "подписывайтесь на канал",
-    "корректор",
 )
+
+# «Корректор» — единственный маркер, который сам по себе НЕ титровый: это обычная профессия, и
+# в биографическом блоке допроса «Он работал корректором в типографии» (5 слов) гейт длины
+# пропускал прямо в фильтр. Поэтому требуем титрового окружения: соседний «редактор»/«субтитр»
+# либо подпись инициалами («А.Егорова», «И .Бойкова» — пробел перед точкой встречается в
+# реальных распознаваниях).
+_INITIALS_RE = re.compile(r"\b[а-яёa-z]\s*\.\s*[а-яёa-z]", re.IGNORECASE)
 
 
 def looks_like_known_hallucination(text: str) -> bool:
     """True для заученных титровых фраз. Намеренно узко: слово должно встретиться в коротком
     сегменте (титры — это весь «распознанный» текст, а не вставка в живую реплику), иначе
-    настоящая реплика со словом «субтитры» была бы выброшена."""
+    настоящая реплика со словом «субтитры» была бы выброшена. Гейта длины для этого мало —
+    маркеры-профессии («корректор») в короткую живую реплику помещаются свободно, поэтому им
+    нужен ещё и титровый контекст (см. `_INITIALS_RE`)."""
     low = text.lower()
     if len(text.split()) > 8:
         return False
-    return any(m in low for m in _CREDIT_MARKERS)
+    if any(m in low for m in _CREDIT_MARKERS):
+        return True
+    return ("корректор" in low
+            and ("редактор" in low or "субтитр" in low or bool(_INITIALS_RE.search(text))))
 
 
 def _is_subsequence(words: list[str], pwords: list[str]) -> bool:
@@ -127,6 +139,29 @@ def looks_like_prompt_echo(text: str, prompt: str | None) -> bool:
         stem = words[0][:_STEM_LEN]
         return any(len(pw) >= _STEM_LEN and pw[:_STEM_LEN] == stem for pw in pwords)
     return False
+
+
+def hallucination_reason(text: str, prompt: str | None) -> str | None:
+    """Какой из трёх фильтров забракует `text`, или None. Один порядок проверок на все точки
+    вызова (провайдер, live-сессия, пакетный проход) — чтобы в аудите было видно ИМЕННО
+    сработавший фильтр, а не просто факт исчезновения реплики."""
+    if not text:
+        return None
+    if has_repeating_ngram(text):
+        return "повтор"
+    if looks_like_prompt_echo(text, prompt):
+        return "эхо промпта"
+    if looks_like_known_hallucination(text):
+        return "титры"
+    return None
+
+
+def dropped_note(where: str, reason: str, text: str) -> str:
+    """Единая строка аудита отбраковки. Раньше выброшенное не оставляло никакого следа: в
+    юридически значимом протоколе реплика просто исчезала, и разобрать постфактум, был это шум
+    или живая речь, было нечем. Фильтры намеренно не смягчаем (размен взвешен в докстрингах
+    выше) — закрываем именно молчаливость."""
+    return f"[фильтр] {where}: отброшено ({reason}) — {text!r}"
 
 
 class ASRProvider:

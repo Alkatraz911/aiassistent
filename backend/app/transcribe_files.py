@@ -85,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
         print("  ВНИМАНИЕ: --batch ускоряет вдвое, но отключает лестницу температур и "
               "hallucination_silence_threshold (ограничение faster-whisper) — защита от "
               "галлюцинаций слабее", file=sys.stderr)
+        if opts.condition_on_previous_text:
+            print("  ВНИМАНИЕ: --context вместе с --batch не действует — батчевый проход "
+                  "выставляет condition_on_previous_text=False жёстко", file=sys.stderr)
 
     transcriber = BatchTranscriber(opts, reporter)
     taken: set[Path] = set()
@@ -195,7 +198,8 @@ def _expand_inputs(paths: list[str], exts: list[str], recursive: bool) -> list[P
     """Файлы, папки и маски -> список записей.
 
     Маски раскрываются здесь, а не оболочкой: PowerShell и cmd передают `*.m4a` программе как
-    есть, поэтому без этого самый очевидный вызов из README не работал бы вовсе.
+    есть, поэтому без этого самый очевидный вызов из README не работал бы вовсе. `**` в маске
+    раскрывается вглубь только с `-r` — рекурсию просят флагом, а не написанием маски.
     """
     exts = {("." + e.strip().lower().lstrip(".")) for e in exts if e.strip()}
     found: list[Path] = []
@@ -208,11 +212,18 @@ def _expand_inputs(paths: list[str], exts: list[str], recursive: bool) -> list[P
             found.append(p)
 
     for raw in paths:
-        if any(ch in raw for ch in "*?["):
-            for hit in sorted(glob.glob(raw, recursive=True)):
+        p = Path(raw)
+        # Существующий путь — всегда файл/папка, даже если в имени есть `[` или `*`. Иначе
+        # `E:\rec\[2024-03] допрос.m4a` (обычное имя с диктофона) уходил в glob, `[2024-03]`
+        # читался как класс символов, совпадений не находилось — и запись исчезала МОЛЧА,
+        # потому что ветка glob уходила по `continue` мимо сообщения «не найдено».
+        if not p.exists() and any(ch in raw for ch in "*?["):
+            hits = sorted(glob.glob(raw, recursive=recursive))
+            if not hits:
+                print(f"не найдено по маске: {raw}", file=sys.stderr)
+            for hit in hits:
                 add(Path(hit))
             continue
-        p = Path(raw)
         if p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
             for hit in sorted(it):

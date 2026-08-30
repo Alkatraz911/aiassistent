@@ -32,8 +32,11 @@ class WordAligner:
         self._torch = torch
         self.device = device.resolve_torch_device(config.FINALIZE_DEVICE)
         name = config.ALIGN_MODEL
-        self.processor = Wav2Vec2Processor.from_pretrained(name)
-        self.model = Wav2Vec2ForCTC.from_pretrained(name).eval().to(self.device)
+        # Веса — в каталог проекта, как у whisper и ECAPA: кеш huggingface в профиле не
+        # переезжает вместе с проектом (см. config.WHISPER_DOWNLOAD_ROOT).
+        cache = str(config.BASE_DIR / "models" / "align")
+        self.processor = Wav2Vec2Processor.from_pretrained(name, cache_dir=cache)
+        self.model = Wav2Vec2ForCTC.from_pretrained(name, cache_dir=cache).eval().to(self.device)
         self._vocab = {k.lower(): v for k, v in self.processor.tokenizer.get_vocab().items()}
         self._blank = self.processor.tokenizer.pad_token_id or 0
         # символ-разделитель слов в wav2vec2 (обычно "|")

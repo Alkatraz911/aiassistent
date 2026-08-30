@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import threading
 
 import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -41,6 +42,15 @@ app.add_middleware(
 # --- преполёт: проверить устройство и прогреть модель до первой записи ---------
 
 STARTUP_WARNING: str | None = None      # непустая строка -> GPU просили, но не поднялся
+
+# Взведён, когда преполёт закончил и `manager.active_key` наконец означает РЕАЛЬНОЕ устройство,
+# а не намерение. До этого момента ключ ещё может смениться (откат на CPU), поэтому сессию
+# создавать нельзя: `Session.__init__` снимает снимок ключа на всю свою жизнь, и сессия,
+# созданная в окне загрузки, навсегда осталась бы привязанной к устройству, которое так и не
+# поднялось, — каждая её partial/final-задача падала бы. Ждём готовности вместо того, чтобы
+# разрешать ключ позднее: ждать несколько секунд один раз на старте дешевле и понятнее, чем
+# разносить «когда именно зафиксирован ключ» по всему пути постановки заданий.
+PREFLIGHT_DONE = threading.Event()
 
 CUDA_HELP = (
     "Проверьте: (1) `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12` в этом venv "
@@ -92,24 +102,51 @@ def _preflight() -> None:
         print(f"[asr] откат на CPU тоже не удался: {exc}")
 
 
+def _preflight_and_signal() -> None:
+    """Преполёт + взведение `PREFLIGHT_DONE` при ЛЮБОМ исходе — иначе ожидающие зависли бы
+    навсегда на непредвиденной ошибке внутри `_preflight`."""
+    try:
+        _preflight()
+    finally:
+        PREFLIGHT_DONE.set()
+
+
+def _wait_preflight() -> None:
+    """Блокирующее ожидание конца преполёта — звать только из потока, не из event loop.
+
+    Без таймаута намеренно: событие взводится в `finally`, то есть ожидание кончается при любом
+    исходе, а обрывать по таймауту первую загрузку весов (large-v3 качается минутами на первом
+    запуске) значило бы ломать самый обычный сценарий ради несуществующего дедлока.
+    """
+    PREFLIGHT_DONE.wait()
+
+
 @app.on_event("startup")
 async def _on_startup() -> None:
     # В отдельном потоке: загрузка модели — секунды, а event loop должен принимать соединения.
-    asyncio.get_running_loop().run_in_executor(None, _preflight)
+    # Но принимать — не значит обслуживать вслепую: точки, создающие сессию, ждут PREFLIGHT_DONE.
+    asyncio.get_running_loop().run_in_executor(None, _preflight_and_signal)
 
 
 @app.get("/api/health")
 def health() -> dict:
     cuda_devices, cuda_why = device.probe_cuda()
+    loading = not PREFLIGHT_DONE.is_set()
     return {
-        "ok": STARTUP_WARNING is None,
+        # Пока преполёт не кончился, `ok: true` был бы обещанием, которого мы не давали:
+        # `device` в этот момент — ещё НАМЕРЕНИЕ, и при провале GPU оно сменится на cpu, а
+        # STARTUP_WARNING ещё пуст. Раньше клиент в это окно рисовал зелёный бейдж «GPU».
+        "ok": STARTUP_WARNING is None and not loading,
+        "loading": loading,
         "asr": config.ASR_PROVIDER,
         "model": manager.active_model,
         "device": manager.active_key[1],
         "compute": manager.active_key[2],
         "cuda_devices": cuda_devices,
         "cuda_unavailable_reason": cuda_why or None,
-        "warning": STARTUP_WARNING,
+        # Не-None и на время загрузки: клиент, не знающий про `loading`, всё равно не покажет
+        # зелёное «всё хорошо» там, где итог ещё не известен.
+        "warning": STARTUP_WARNING or ("модель ещё загружается" if loading else None),
     }
 
 
@@ -133,6 +170,10 @@ def _step_payload(step) -> dict:
 
 @app.post("/api/assistant/start")
 def assistant_start(req: SessionReq) -> dict:
+    # Сессия фиксирует ключ модели на всю жизнь — создавать её до конца преполёта нельзя
+    # (см. PREFLIGHT_DONE). Хендлер синхронный, FastAPI держит его в threadpool, так что
+    # ожидание здесь не блокирует event loop.
+    _wait_preflight()
     s = manager.get(req.session_id) or manager.create(req.session_id)
     if req.template_id:
         tmpl = templates_store.store.get(req.template_id)
@@ -411,6 +452,10 @@ async def _drain_outbox(ws: WebSocket, out_queue: asyncio.Queue) -> None:
 
 @app.websocket("/ws/stream/{session_id}")
 async def ws_stream(ws: WebSocket, session_id: str) -> None:
+    # Ждём преполёт ДО accept, а не после: клиент начинает захват и шлёт PCM по `onopen`, и
+    # принять сокет раньше готовности значило бы либо копить кадры, либо гнать их в сессию с
+    # ещё не устоявшимся ключом модели (см. PREFLIGHT_DONE).
+    await asyncio.to_thread(_wait_preflight)
     await ws.accept()
     s = manager.get(session_id) or manager.create(session_id)
     loop = asyncio.get_running_loop()

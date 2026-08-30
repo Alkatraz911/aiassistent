@@ -23,8 +23,7 @@ import numpy as np
 
 from . import config, telemetry
 from .asr import get_asr
-from .asr.base import (ASRWord, has_repeating_ngram, looks_like_known_hallucination,
-                       looks_like_prompt_echo)
+from .asr.base import ASRWord, dropped_note, hallucination_reason
 from .asr.local_agreement import UtteranceHypothesis
 from .asr.model_manager import ModelKey, ModelManager
 from .asr.scheduler import AsrJob, AsrScheduler, PRIORITY_FINAL, PRIORITY_ONESHOT, PRIORITY_PARTIAL
@@ -115,8 +114,11 @@ class Session:
                     seg.edits.append(Edit(field="speaker", old=seg.speaker, new=new_label))
                     seg.speaker = new_label
                     n += 1
-            # Пер-канальную метку двигаем только если канал целиком был этим голосом — иначе
-            # новые реплики этого канала унаследовали бы имя чужого спикера.
+            # Пер-канальная метка задаёт имя БУДУЩИХ реплик канала, поэтому двигаем её следом.
+            # Сегменты канала при этом не пересматриваем, и проверять нечего: запись в
+            # `speaker_names` появляется только через `set_speaker` («весь канал — этот
+            # голос»), а диаризация эту карту не трогает вовсе — значит канал, разложенный на
+            # «Голос-1»/«Голос-2», сюда просто не попадёт.
             for ch, name in list(self.speaker_names.items()):
                 if name == old_label:
                     self.speaker_names[ch] = new_label
@@ -226,7 +228,10 @@ class Session:
 
             if (st.hypothesis is not None
                     and not st.endpointer.is_closed(st.hypothesis.utterance_id)):
-                if st.lag_ema_ms > config.ASR_OVERLOAD_LAG_MS:
+                # Пороги — от устройства ЭТОЙ сессии (asr_model_key), а не от модуль-уровневых
+                # констант: те заморожены на импорте и остаются GPU-шными даже после отката
+                # преполёта на CPU (см. config.asr_overload_lag_ms).
+                if st.lag_ema_ms > config.asr_overload_lag_ms(self.asr_model_key[1]):
                     # Модель фундаментально не успевает за реальным временем на этом железе
                     # (naблюдалось: decode ~10с на 5с аудио на turbo/CPU — это не вопрос
                     # каданса, никакой откат внутри разумных пределов не поможет). В таком
@@ -239,7 +244,8 @@ class Session:
                     # Адаптивный каданс без искусственного потолка — если лаг реально ~10с,
                     # требуемый интервал должен быть порядка 10с+, а не капаться в 3.6с (это и
                     # была первая, недостаточная версия фикса: потолок глушил сам смысл отката).
-                    required_ms = max(config.ASR_UPDATE_MS, st.lag_ema_ms * 1.3)
+                    required_ms = max(config.asr_update_ms(self.asr_model_key[1]),
+                                      st.lag_ema_ms * 1.3)
                     if new_ms >= required_ms:
                         self._submit_partial(channel, st)
 
@@ -408,9 +414,12 @@ class Session:
         # промпте нет, фильтр провайдера пропустил, — LocalAgreement закоммитил слова, а после
         # подрезки в сегменте осталось голое «опрос.», то есть чистое эхо. Проверяем ровно то,
         # что пойдёт в протокол.
-        if text and (has_repeating_ngram(text)
-                     or looks_like_prompt_echo(text, config.WHISPER_PROMPT)
-                     or looks_like_known_hallucination(text)):
+        reason = hallucination_reason(text, config.WHISPER_PROMPT)
+        if reason:
+            # Отбраковка тут молчала совсем: Segment не создавался, и реплика пропадала из
+            # протокола бесследно. Собранный из партиалов текст в лог — единственная
+            # возможность потом понять, что именно выбросили и каким правилом.
+            print(dropped_note(f"сессия {self.id}/канал {channel}", reason, text))
             text = ""
 
         is_current_epoch = (epoch == self.stream_epoch)

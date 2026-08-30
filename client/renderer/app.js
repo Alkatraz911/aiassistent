@@ -21,6 +21,16 @@ const state = {
 async function checkHealth() {
   try {
     const r = await fetch(`${HTTP}/api/health`).then((x) => x.json());
+    // Пока идёт преполёт, устройство в ответе — ещё только НАМЕРЕНИЕ: если GPU не поднимется,
+    // сервер откатится на CPU. Зелёный бейдж «large-v3 · GPU» в этот момент — прямая
+    // дезинформация, поэтому ждём итога и перезапрашиваем.
+    if (r.loading) {
+      $("health").textContent = "⏳ загрузка модели…";
+      $("health").className = "badge warn";
+      $("health").title = r.warning || "";
+      setTimeout(checkHealth, 1500);
+      return;
+    }
     // Устройство показываем прямо в бейдже: одна и та же модель на CPU и на GPU — это разные
     // режимы работы (large-v3 на CPU live не тянет вовсе), и видеть это надо ДО записи, а не
     // потом по растущей задержке. r.warning непустой — GPU просили, но он не поднялся.
@@ -135,7 +145,18 @@ async function loadMics() {
   if (!has($("mic0").value) && devices[0]) $("mic0").value = devices[0].deviceId;
   // Второй канал ставим, только если есть ВТОРОЕ устройство. Единственный вход оставляем
   // неназначенным: пусть это будет осознанный выбор режима, а не молча задвоенная запись.
-  if (!$("mic1").value && devices[1]) $("mic1").value = devices[1].deviceId;
+  // Ориентироваться на пустое значение тут нельзя: у mic1 пусто — это ещё и законный выбор
+  // «— не используется —», и по нему ⟳ возвращал второе устройство, снова задваивая протокол.
+  // Различает эти два случая только пометка dataset.chosen (см. onMicChosen).
+  if (!$("mic1").dataset.chosen && !$("mic1").value && devices[1]) {
+    $("mic1").value = devices[1].deviceId;
+  }
+  checkMicsDistinct();
+}
+
+// Пользователь тронул селектор микрофона — с этого момента выбор его, а не наш.
+function onMicChosen(e) {
+  e.currentTarget.dataset.chosen = "1";
   checkMicsDistinct();
 }
 
@@ -838,14 +859,27 @@ function openSpeakerModal(channel, speaker) {
 async function applySpeaker(label) {
   if (!label) label = $("speakerInput").value.trim();
   if (!label || modalChannel === null) return;
-  await fetch(`${HTTP}/api/speaker`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    // speaker — какой именно голос переименовываем. После диаризации общего микрофона в
-    // одном канале лежат разные спикеры, и переименование «по каналу» схлопнуло бы весь
-    // протокол в одну метку (реальный баг: «Голос-2» -> «Опрашивающий» у всех реплик).
-    body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label,
-                           speaker: modalSpeaker }),
-  });
+  // Лента перерисовывается локально, поэтому ответ обязателен к проверке: на истёкшей сессии
+  // /api/speaker отдаёт 404 «no session», сервер ничего не переименовал — и молчаливая
+  // перерисовка показала бы новую метку, которой в протоколе нет.
+  let r;
+  try {
+    r = await fetch(`${HTTP}/api/speaker`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // speaker — какой именно голос переименовываем. После диаризации общего микрофона в
+      // одном канале лежат разные спикеры, и переименование «по каналу» схлопнуло бы весь
+      // протокол в одну метку (реальный баг: «Голос-2» -> «Опрашивающий» у всех реплик).
+      body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label,
+                             speaker: modalSpeaker }),
+    }).then((x) => x.json());
+  } catch (e) {
+    alert("Ошибка: " + e);
+    return;
+  }
+  if (r.error) {
+    alert("Не удалось переименовать голос: " + r.error);
+    return;
+  }
   // Локально обновляем ленту, не перезагружая протокол.
   state.segments.forEach((s) => {
     // Обновляем ровно те строки, что реально переименованы на сервере.
@@ -903,8 +937,8 @@ function bind() {
     }).then(() => alert("Протокол сохранён на сервере."));
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
-  $("mic0").onchange = checkMicsDistinct;
-  $("mic1").onchange = checkMicsDistinct;
+  $("mic0").onchange = onMicChosen;
+  $("mic1").onchange = onMicChosen;
   $("stereoSplit").onchange = checkMicsDistinct;
   $("modelSelect").onchange = onModelChange;
   $("audio").addEventListener("timeupdate", onTimeUpdate);

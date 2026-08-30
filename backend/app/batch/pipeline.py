@@ -31,8 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import config
-from ..asr.base import (has_repeating_ngram, looks_like_known_hallucination,
-                        looks_like_prompt_echo)
+from ..asr.base import dropped_note, hallucination_reason
 from .blocks import plan_blocks
 from .decode import (close_pcm, decode_to_pcm, open_pcm, probe_duration,
                      to_float32)
@@ -101,7 +100,13 @@ class Options:
         payload = json.dumps({
             "model": self.model, "device": self.device, "compute": self.compute,
             "language": self.language, "prompt": self.prompt, "beam": self.beam_size,
-            "context": self.condition_on_previous_text, "batch": self.batch,
+            # В батчевом режиме `--context` на текст не влияет ВООБЩЕ: BatchedInferencePipeline
+            # выставляет condition_on_previous_text=False жёстко (faster_whisper 1.1.0,
+            # transcribe.py:505). В подписи он тогда только вредит — снятие или добавление
+            # флага обесценивало бы валидный чекпойнт трёхчасовой работы без единого различия
+            # в результате.
+            "context": self.condition_on_previous_text and not self.batch,
+            "batch": self.batch,
             "block_s": self.block_s, "words": self.word_timestamps,
         }, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
@@ -150,7 +155,6 @@ class BatchTranscriber:
         self.opts = opts
         self.reporter = reporter or Reporter()
         self._provider = None
-        self._batched = None
         self._diarizer = None
 
     # --- модель ---------------------------------------------------------------
@@ -171,10 +175,10 @@ class BatchTranscriber:
     def _decoder(self):
         if not self.opts.batch:
             return self.provider.model
-        if self._batched is None:
-            from faster_whisper import BatchedInferencePipeline
-            self._batched = BatchedInferencePipeline(model=self.provider.model)
-        return self._batched
+        # Обёртку берём у провайдера, а не собираем свою: там та же ленивая инициализация плюс
+        # предупреждение о том, что в батчевом режиме отключаются
+        # hallucination_silence_threshold и лестница температур.
+        return self.provider._batched_pipeline()
 
     # --- один файл ------------------------------------------------------------
 
@@ -277,10 +281,13 @@ class BatchTranscriber:
             text = (seg.text or "").strip()
             if not text:
                 continue
-            if (has_repeating_ngram(text)
-                    or looks_like_prompt_echo(text, self.opts.prompt)
-                    or looks_like_known_hallucination(text)):
+            reason = hallucination_reason(text, self.opts.prompt)
+            if reason:
                 stats["dropped"] += 1
+                # Счётчик говорит СКОЛЬКО, но не что именно: на трёхчасовой записи проверить
+                # отбраковку по одному числу нельзя. Через reporter, а не print — иначе строка
+                # затрёт живой прогресс.
+                self.reporter.note(dropped_note(hms(offset + float(seg.start)), reason, text))
                 continue
             yield Segment(
                 start=offset + float(seg.start),

@@ -108,7 +108,11 @@ class StereoSplitCapture {
       },
     });
     const track = this.stream.getAudioTracks()[0];
-    const got = (track.getSettings && track.getSettings().channelCount) || 0;
+    // `channelCount: 2` в constraints — НЕточное ограничение: моно-грант это законный ответ
+    // браузера, а не аномалия. Поэтому смотрим на факт. Прежнее `got === 1` пропускало моно
+    // всюду, где адаптер не отдаёт channelCount вовсе (на Windows обычное дело): 0 !== 1, и
+    // «неизвестно» проходило за «всё хорошо». Теперь неизвестное — повод проверить сигнал.
+    const got = (track && track.getSettings && track.getSettings().channelCount) || 0;
     if (got === 1) {
       // Честнее упасть здесь, чем писать час и получить две одинаковые дорожки.
       this.stop();
@@ -123,6 +127,18 @@ class StereoSplitCapture {
       new DataView(h).setInt32(0, ch, true);
       return new Uint8Array(h);
     });
+    source.connect(this.node);
+    this.node.connect(this.ctx.destination);
+
+    // Числом каналов буфера моно тут не поймать: createScriptProcessor(4096, 2, 2) апмиксит
+    // моно-источник ДУБЛИРОВАНИЕМ, поэтому numberOfChannels всегда 2, а дорожки побайтово
+    // одинаковы — протокол задваивается с одинаковыми тайм-кодами, а кросс-канальный гейт
+    // сравнивает сигнал сам с собой. Единственный оставшийся признак — сам сигнал; смотрим на
+    // него ДО того, как включим отправку, иначе задвоенные кадры уже уедут в WS.
+    if (got !== 2 && !(await this._sourceLooksStereo())) {
+      this.stop();
+      throw new Error("устройство отдало моно вместо стерео — расщеплять нечего");
+    }
 
     this.node.onaudioprocess = (e) => {
       if (this.ws.readyState !== WebSocket.OPEN) return;
@@ -136,11 +152,36 @@ class StereoSplitCapture {
         this.ws.send(frame);
       }
     };
-    source.connect(this.node);
-    this.node.connect(this.ctx.destination);
+  }
+
+  /** Различаются ли L и R в первом же буфере с сигналом. Судим только по буферу, где сигнал
+   *  ЕСТЬ: цифровая тишина в обоих каналах одинакова и у настоящего стерео, и по ней исправный
+   *  адаптер был бы отвергнут. Если сигнала так и не появилось — не мешаем записи: сильную
+   *  проверку (channelCount === 1) мы уже прошли, а глушить запись по догадке хуже. */
+  _sourceLooksStereo(timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      const done = (verdict) => {
+        clearTimeout(timer);
+        this.node.onaudioprocess = null;
+        resolve(verdict);
+      };
+      const timer = setTimeout(() => done(true), timeoutMs);
+      this.node.onaudioprocess = (e) => {
+        const l = e.inputBuffer.getChannelData(0);
+        const r = e.inputBuffer.numberOfChannels > 1 ? e.inputBuffer.getChannelData(1) : l;
+        let differs = false, signal = false;
+        for (let i = 0; i < l.length; i++) {
+          if (l[i] !== 0 || r[i] !== 0) signal = true;
+          if (l[i] !== r[i]) { differs = true; break; }
+        }
+        if (differs) done(true);
+        else if (signal) done(false);
+      };
+    });
   }
 
   stop() {
+    try { this.node && (this.node.onaudioprocess = null); } catch (_) {}
     try { this.node && this.node.disconnect(); } catch (_) {}
     try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
     try { this.ctx && this.ctx.close(); } catch (_) {}

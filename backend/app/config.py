@@ -31,6 +31,14 @@ ASR_PROVIDER = os.getenv("ASR_PROVIDER", "faster_whisper")
 WHISPER_DEVICE_REQUESTED = os.getenv("WHISPER_DEVICE", "auto")
 WHISPER_DEVICE = device.resolve_device(WHISPER_DEVICE_REQUESTED)
 IS_GPU = WHISPER_DEVICE.startswith("cuda")
+
+
+def _is_gpu(device_name: str | None = None) -> bool:
+    """`IS_GPU`, но для явно переданного устройства. Нужно там, где устройство после импорта
+    меняется (откат преполёта на CPU) — см. `asr_overload_lag_ms`."""
+    return (device_name or WHISPER_DEVICE).startswith("cuda")
+
+
 # Какие карты использовать: "0" или "0,1" при нескольких GPU (CTranslate2 device_index).
 WHISPER_DEVICE_INDEX = [int(x) for x in os.getenv("WHISPER_DEVICE_INDEX", "0").split(",") if x.strip()]
 
@@ -48,6 +56,15 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3" if IS_GPU else "small")
 # На какую модель откатываться, если GPU просили, а он не поднялся (см. main.py::_preflight):
 # large-v3 на CPU не тянет live вовсе, поэтому откат — это откат и по устройству, и по модели.
 WHISPER_MODEL_CPU_FALLBACK = os.getenv("WHISPER_MODEL_CPU_FALLBACK", "small")
+# Куда качаются веса whisper. По умолчанию — В ПРОЕКТ, рядом с моделью диаризатора
+# (`models/ecapa`), а не в общий кеш huggingface в профиле пользователя. Кеш профиля переживает
+# переустановку проекта, но не переезд: на другой машине, под другим пользователем или у службы
+# Windows (свой профиль) все веса качаются заново — 3 ГБ на large-v3 перед первой же записью.
+# Каталог `models/` лежит в .gitignore: веса не версионируются, но и не разбегаются по профилям.
+# Пустая строка возвращает поведение huggingface по умолчанию (общий кеш ~/.cache/huggingface).
+# Уже скачанное переносится без перекачки — структура каталогов внутри та же:
+#   move %USERPROFILE%\.cache\huggingface\hub\models--Systran--faster-whisper-*  backend\models\whisper
+WHISPER_DOWNLOAD_ROOT = os.getenv("WHISPER_DOWNLOAD_ROOT", str(BASE_DIR / "models" / "whisper"))
 # int8 — для CPU (там это главный ускоритель). На GPU float16 и быстрее, и точнее int8: тензорные
 # ядра считают fp16 нативно, а int8 на GPU требует квантования с потерей качества без выигрыша.
 # int8_float16 — компромисс для карт с малым VRAM (модель весит вдвое меньше, скорость близка).
@@ -139,7 +156,17 @@ VAD_SPEECH_MARGIN_DB = float(os.getenv("VAD_SPEECH_MARGIN_DB", "6.0"))
 # Отсюда и значение: на GPU держим границу низкой, чтобы лёгкая модель могла обновлять текст так
 # часто, как реально успевает, а тяжёлая просто упёрлась в своё время декодирования. На CPU
 # низкая граница смысла не имеет — там не успевает ни одна модель.
-ASR_UPDATE_MS = int(os.getenv("ASR_UPDATE_MS", "400" if IS_GPU else "900"))
+_ASR_UPDATE_MS_ENV = os.getenv("ASR_UPDATE_MS")
+
+
+def asr_update_ms(device_name: str | None = None) -> int:
+    """Каданс партиалов для КОНКРЕТНОГО устройства (см. `asr_overload_lag_ms` — там же почему)."""
+    if _ASR_UPDATE_MS_ENV:
+        return int(_ASR_UPDATE_MS_ENV)
+    return 400 if _is_gpu(device_name) else 900
+
+
+ASR_UPDATE_MS = asr_update_ms()      # значение под устройство, определившееся при импорте
 ASR_WINDOW_MS = int(os.getenv("ASR_WINDOW_MS", "12000"))       # окно RollingBuffer для partial-decode
 ASR_LOOKBACK_MS = int(os.getenv("ASR_LOOKBACK_MS", "2000"))    # контекст до committed_boundary
 # Партиалы считаем beam=1 (жадно) — и на CPU, и на GPU. Соблазн поднять beam на GPU («там же
@@ -210,4 +237,22 @@ ASR_BATCH_SIZE = int(os.getenv("ASR_BATCH_SIZE", "8"))
 # отключали бы партиалы ровно в момент активного диалога — там, где живой текст нужнее всего.
 # 2.5с оставляет запас над нормальным раундом тяжёлой модели и всё равно реагирует заметно
 # раньше CPU-порога. Если ставите модель полегче (turbo), порог можно опустить следом.
-ASR_OVERLOAD_LAG_MS = float(os.getenv("ASR_OVERLOAD_LAG_MS", "2500" if IS_GPU else "4000"))
+_ASR_OVERLOAD_LAG_MS_ENV = os.getenv("ASR_OVERLOAD_LAG_MS")
+
+
+def asr_overload_lag_ms(device_name: str | None = None) -> float:
+    """Порог перегрузки для КОНКРЕТНОГО устройства, а не для того, что определилось при импорте.
+
+    `IS_GPU` замерзает на импорте, а устройство после этого меняется: преполёт
+    (`main.py::_preflight`) откатывает на CPU, если GPU не поднялся. Константа при этом
+    оставалась GPU-шной, и партиалы на CPU отключались на 1.5с раньше положенного — ровно в
+    деградированном режиме, где живой текст оператору нужнее всего. Тот же принцип, что в
+    `main.py::switch_model`: устройство берём от АКТИВНОГО ключа, а не из config.
+    Явно заданная переменная окружения главнее — её откат переигрывать не должен.
+    """
+    if _ASR_OVERLOAD_LAG_MS_ENV:
+        return float(_ASR_OVERLOAD_LAG_MS_ENV)
+    return 2500.0 if _is_gpu(device_name) else 4000.0
+
+
+ASR_OVERLOAD_LAG_MS = asr_overload_lag_ms()   # под устройство, определившееся при импорте

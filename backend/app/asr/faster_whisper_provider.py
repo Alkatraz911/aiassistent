@@ -10,8 +10,7 @@ from __future__ import annotations
 import numpy as np
 
 from .. import config
-from .base import (ASRProvider, ASRResult, ASRWord, has_repeating_ngram,
-                   looks_like_known_hallucination, looks_like_prompt_echo)
+from .base import ASRProvider, ASRResult, ASRWord, dropped_note, hallucination_reason
 
 
 class FasterWhisperASR(ASRProvider):
@@ -30,6 +29,10 @@ class FasterWhisperASR(ASRProvider):
         self.is_gpu = self.device.startswith("cuda")
         self._batched = None      # BatchedInferencePipeline, лениво (см. _batched_pipeline)
         kwargs = {}
+        if config.WHISPER_DOWNLOAD_ROOT:
+            # Веса — в каталог проекта, а не в кеш профиля (см. config.WHISPER_DOWNLOAD_ROOT).
+            # Скачиваются один раз: huggingface_hub при попадании в кеш сеть не трогает вовсе.
+            kwargs["download_root"] = config.WHISPER_DOWNLOAD_ROOT
         if self.is_gpu:
             # Какие карты (при нескольких GPU) и сколько параллельных исполнителей внутри модели.
             # Без num_workers>1 конкурентные вызовы transcribe() из разных потоков планировщика
@@ -128,8 +131,9 @@ class FasterWhisperASR(ASRProvider):
         # там пятнадцатого марта»), и такая — совершенно настоящая — реплика оказалась бы
         # подпоследовательностью недавнего контекста и была бы выброшена. Эхо же приходит именно
         # от неизменной доменной подсказки: продолжать на не-речи декодеру больше нечего.
-        if (has_repeating_ngram(text) or looks_like_prompt_echo(text, config.WHISPER_PROMPT)
-                or looks_like_known_hallucination(text)):
+        reason = hallucination_reason(text, config.WHISPER_PROMPT)
+        if reason:
+            print(dropped_note("провайдер", reason, text))
             return ASRResult(text="", words=[], language=info.language)
 
         return ASRResult(text=text, words=words, language=info.language)
@@ -143,10 +147,12 @@ class FasterWhisperASR(ASRProvider):
         `ASR_BATCH_ENABLED`). Порог `ASR_BATCH_MIN_S` — потому что на коротком куске батчить
         нечего; на CPU выигрыша нет вовсе.
 
-        Набор параметров у обоих путей одинаковый (в faster-whisper 1.1.0 батчевый
-        `transcribe()` отличается только дополнительным `batch_size`), поэтому защиты от
-        галлюцинаций — temperature-лестница, `hallucination_silence_threshold`, VAD — действуют
-        в обоих режимах одинаково.
+        Сигнатуры у обоих путей совпадают (батчевый берёт те же kwargs плюс `batch_size`), но
+        защиты от галлюцинаций в батчевом режиме РАВНОЗНАЧНЫМИ НЕ ОСТАЮТСЯ: собирая
+        `TranscriptionOptions`, он молча подменяет два наших параметра (faster_whisper 1.1.0,
+        transcribe.py:490-505) — `hallucination_silence_threshold=None` и лестницу температур на
+        `temperature[:1]`, то есть на голый 0.0. Работает только VAD. Исключения при этом нет,
+        текст просто тихо становится хуже; предупреждение печатает `_batched_pipeline`.
         """
         duration_s = audio.size / float(config.SAMPLE_RATE)
         if (config.ASR_BATCH_ENABLED and self.is_gpu
@@ -164,10 +170,11 @@ class FasterWhisperASR(ASRProvider):
         `ModelManager.acquire`, где параллельная загрузка ОДНОЙ модели реально ломалась."""
         if self._batched is None:
             from faster_whisper import BatchedInferencePipeline
-            print("[asr] ВНИМАНИЕ: включён ASR_BATCH_ENABLED — для кусков длиннее "
-                  f"{config.ASR_BATCH_MIN_S:.0f}с перестают действовать "
+            # Формулировка без привязки к ASR_BATCH_ENABLED: тот же конвейер берёт пакетный
+            # проход (`--batch`, batch/pipeline.py), где переменная ни при чём.
+            print("[asr] ВНИМАНИЕ: включён батчевый проход — в нём перестают действовать "
                   "hallucination_silence_threshold и лестница температур "
-                  "(ограничение faster-whisper, см. config.py)")
+                  "(ограничение faster-whisper, см. config.py / ASR_BATCH_ENABLED)")
             self._batched = BatchedInferencePipeline(model=self.model)
         return self._batched
 
