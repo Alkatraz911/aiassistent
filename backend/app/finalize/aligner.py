@@ -51,7 +51,12 @@ class WordAligner:
         torch = self._torch
         import torchaudio.functional as AF
 
+        # Для сопоставления с CTC-эмиссией текст нужен в нижнем регистре (словарь wav2vec2
+        # строчный), но ОТДАВАТЬ наружу надо исходное написание: сегмент рисуется в протоколе
+        # по словам, и подмена «Миша» на «миша» портила бы уже готовый текст. Оба списка —
+        # результат одного и того же split(), поэтому индексы совпадают один в один.
         words = [w for w in text.lower().split() if w]
+        originals = [w for w in text.split() if w]
         if not words or audio.size < sample_rate // 10:
             return []
 
@@ -106,6 +111,6 @@ class WordAligner:
             start = min(s.start for s in sp) * sec_per_frame
             end = max(s.end for s in sp) * sec_per_frame
             prob = float(np.mean([float(s.score) for s in sp]))
-            out.append({"text": word, "start": round(start, 3),
+            out.append({"text": originals[wi], "start": round(start, 3),
                         "end": round(end, 3), "prob": round(prob, 3)})
         return out

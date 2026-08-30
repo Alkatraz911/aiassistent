@@ -40,8 +40,8 @@ def main() -> None:
     s._closed = True  # WAV уже записан вручную
 
     seg = Segment(channel=0, speaker="Опрашиваемый", start=0.2, end=2.8,
-                  text="привет как дела сегодня",
-                  text_original="привет как дела сегодня",
+                  text="Привет, как дела сегодня?",
+                  text_original="Привет, как дела сегодня?",
                   words=[Word(text="привет", start=0.2, end=2.8)])
     s.protocol.segments.append(seg)
 
@@ -58,6 +58,14 @@ def main() -> None:
     starts = [w.start for w in seg.words]
     assert starts == sorted(starts), "тайм-коды слов должны возрастать"
     assert seg.words[0].start >= 0 and seg.words[-1].end <= 3.0 + 0.3
+
+    # Выравнивание уточняет ТАЙМ-КОДЫ и не должно переписывать текст. Внутри для сопоставления
+    # с CTC-эмиссией слова приводятся к нижнему регистру (словарь wav2vec2 строчный), и раньше
+    # наружу отдавались именно они: протокол рисуется по словам, поэтому после нажатия
+    # «Уточнить тайм-коды» «Миша» превращалось в «миша», а точки и запятые пропадали.
+    joined = " ".join(w.text for w in seg.words)
+    assert any(c.isupper() for c in joined), f"регистр потерян при выравнивании: {joined!r}"
+    assert any(c in ",?." for c in joined), f"пунктуация потеряна при выравнивании: {joined!r}"
     print("\nALIGN INTEGRATION OK ✅")
 
 
