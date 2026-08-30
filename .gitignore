@@ -1,5 +1,7 @@
 # Python
-backend/.venv/
+# Без префикса пути — venv может лежать и в корне, и в backend/; правило `backend/.venv/`
+# корневой не покрывало, и он попадал в `git add -A` двадцатью с лишним мегабайтами.
+.venv/
 __pycache__/
 *.pyc
 backend/.env
@@ -18,3 +20,7 @@ backend/storage/templates/
 
 # Модели ASR (кэш)
 backend/models/
+
+# Пакетная расшифровка: декодированный звук и чекпойнты (гигабайты, восстановимы)
+.transcribe-work/
+*.pcm
