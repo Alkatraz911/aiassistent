@@ -85,21 +85,56 @@ function updateModelSelectEnabled() {
 async function loadMics() {
   // нужен доступ к устройствам — запросим разрешение
   try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop()); } catch {}
-  const devices = (await navigator.mediaDevices.enumerateDevices())
+  const all = (await navigator.mediaDevices.enumerateDevices())
     .filter((d) => d.kind === "audioinput");
+
+  // Windows отдаёт первыми ДВА псевдоустройства — «Default - …» и «Communications - …», и оба
+  // указывают на один и тот же физический микрофон. Прежний код брал devices[0] и devices[1],
+  // то есть сажал оба канала на одну железку: в протоколе выходили две одинаковые реплики с
+  // одинаковыми тайм-кодами, а канальная диаризация («канал = спикер») теряла смысл целиком.
+  // Псевдоустройства убираем из списка — выбирать нужно ФИЗИЧЕСКИЕ входы.
+  let devices = all.filter((d) => d.deviceId !== "default" && d.deviceId !== "communications");
+  // Подстраховка: если система отдаёт ТОЛЬКО псевдоустройства (встречается, пока не выдано
+  // разрешение на микрофон), лучше показать что есть, чем пустой список.
+  if (!devices.length) devices = all;
+
+  // Два одинаковых USB-микрофона отдают одинаковую подпись — без номера их не различить.
+  const seen = new Map();
+  const nameOf = (d, i) => {
+    const base = (d.label || `Микрофон ${i + 1}`).replace(/^(Default|Communications) - /, "");
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    return n > 1 ? `${base} #${n}` : base;
+  };
+  const names = devices.map(nameOf);
+
   for (const sel of [$("mic0"), $("mic1")]) {
     const cur = sel.value;
     sel.innerHTML = "";
     devices.forEach((d, i) => {
       const o = document.createElement("option");
       o.value = d.deviceId;
-      o.textContent = d.label || `Микрофон ${i + 1}`;
+      o.textContent = names[i];
       sel.appendChild(o);
     });
-    if (cur) sel.value = cur;
+    if (cur && devices.some((d) => d.deviceId === cur)) sel.value = cur;
   }
-  // по умолчанию второй микрофон для опрашиваемого, если есть
-  if (devices[1]) $("mic1").value = devices[1].deviceId;
+  // Разные физические входы по умолчанию: первый — интервьюеру, второй — опрашиваемому.
+  // Только если выбирать ещё не приходилось: кнопка ⟳ не должна сбрасывать ручной выбор.
+  const has = (id) => devices.some((d) => d.deviceId === id);
+  if (!has($("mic0").value) && devices[0]) $("mic0").value = devices[0].deviceId;
+  if (!has($("mic1").value) && devices[1]) $("mic1").value = devices[1].deviceId;
+  checkMicsDistinct();
+}
+
+// Канальная диаризация держится ровно на одном условии: каналы пришли с РАЗНЫХ микрофонов.
+// Если на обоих один вход, никакой алгоритм этого потом не разведёт — предупреждаем сразу,
+// а не после записи, когда протокол уже задвоился.
+function checkMicsDistinct() {
+  const same = $("mic0").value && $("mic0").value === $("mic1").value;
+  const warn = $("micWarn");
+  warn.hidden = !same;
+  return !same;
 }
 
 // ---------- AI-ассистент: анкета (Блок 6 — автозапись ответа по паузам) ----------
@@ -767,6 +802,8 @@ function bind() {
     }).then(() => alert("Протокол сохранён на сервере."));
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
+  $("mic0").onchange = checkMicsDistinct;
+  $("mic1").onchange = checkMicsDistinct;
   $("modelSelect").onchange = onModelChange;
   $("audio").addEventListener("timeupdate", onTimeUpdate);
 
