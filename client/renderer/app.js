@@ -111,27 +111,40 @@ async function loadMics() {
   for (const sel of [$("mic0"), $("mic1")]) {
     const cur = sel.value;
     sel.innerHTML = "";
+    // Канал 1 можно вообще не использовать — это режим одного общего микрофона: писать один
+    // вход в оба канала бессмысленно (протокол задваивается), а разводить голоса потом будет
+    // офлайн-диаризация. Без такого пункта единственное устройство неизбежно попадало в оба
+    // селектора, и запись выходила задвоенной.
+    if (sel.id === "mic1") {
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "— не используется —";
+      sel.appendChild(none);
+    }
     devices.forEach((d, i) => {
       const o = document.createElement("option");
       o.value = d.deviceId;
       o.textContent = names[i];
       sel.appendChild(o);
     });
-    if (cur && devices.some((d) => d.deviceId === cur)) sel.value = cur;
+    if (cur !== null && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
   }
   // Разные физические входы по умолчанию: первый — интервьюеру, второй — опрашиваемому.
   // Только если выбирать ещё не приходилось: кнопка ⟳ не должна сбрасывать ручной выбор.
   const has = (id) => devices.some((d) => d.deviceId === id);
   if (!has($("mic0").value) && devices[0]) $("mic0").value = devices[0].deviceId;
-  if (!has($("mic1").value) && devices[1]) $("mic1").value = devices[1].deviceId;
+  // Второй канал ставим, только если есть ВТОРОЕ устройство. Единственный вход оставляем
+  // неназначенным: пусть это будет осознанный выбор режима, а не молча задвоенная запись.
+  if (!$("mic1").value && devices[1]) $("mic1").value = devices[1].deviceId;
   checkMicsDistinct();
 }
 
 // Устройство для разовой записи ответа анкеты (говорит опрашиваемый). В обычном режиме это
-// его собственный микрофон; в стерео-режиме второго устройства нет вовсе — оба участника
-// приходят одним входом, и селектор канала 1 отключён, поэтому берём тот, что выбран.
+// его собственный микрофон; в стерео-режиме и в режиме одного общего микрофона второго
+// устройства нет вовсе — берём тот единственный, что выбран для канала 0.
 function answerDeviceId() {
-  return $("stereoSplit").checked ? $("mic0").value : $("mic1").value;
+  if ($("stereoSplit").checked) return $("mic0").value;
+  return $("mic1").value || $("mic0").value;
 }
 
 // Канальная диаризация держится ровно на одном условии: каналы пришли с РАЗНЫХ микрофонов.
@@ -142,9 +155,21 @@ function checkMicsDistinct() {
   // В стерео-режиме одно устройство — это норма, а не ошибка: участники разведены по L/R,
   // а не по разным входам. Второй селектор в этом режиме не участвует.
   $("mic1").disabled = stereo;
-  const same = !stereo && $("mic0").value && $("mic0").value === $("mic1").value;
-  $("micWarn").hidden = !same;
-  return !same;
+  const warn = $("micWarn");
+  if (!stereo && $("mic0").value && $("mic0").value === $("mic1").value) {
+    warn.textContent = "⚠ Оба канала на одном микрофоне — разбивки по голосам не будет";
+    warn.hidden = false;
+    return false;
+  }
+  if (!stereo && !$("mic1").value) {
+    // Не ошибка, а осознанный режим — но напоминаем, чем разводить голоса потом.
+    warn.textContent = "ℹ Один микрофон: после записи включите «Один общий микрофон "
+                     + "(диаризация)» и нажмите «Уточнить тайм-коды»";
+    warn.hidden = false;
+    return true;
+  }
+  warn.hidden = true;
+  return true;
 }
 
 // ---------- AI-ассистент: анкета (Блок 6 — автозапись ответа по паузам) ----------
