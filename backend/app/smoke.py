@@ -178,6 +178,34 @@ def test_prompt_has_no_recent_speech() -> None:
     print("PROMPT_NO_RECENT_SPEECH OK ✅")
 
 
+def test_rename_speaker_after_diarization() -> None:
+    """После диаризации общего микрофона в ОДНОМ канале лежат разные спикеры, поэтому
+    переименование должно идти по метке голоса, а не по каналу.
+
+    Реальный баг: пользователь менял «Голос-2» на «Опрашивающий» и получал «Опрашивающий» у
+    ВСЕХ реплик разом, включая чужие, — потому что `set_speaker` переписывает весь канал.
+    Для основного режима (микрофон-на-участника) поведение «весь канал» остаётся верным: там
+    канал и есть спикер, поэтому обе операции существуют рядом."""
+    from .models import Segment
+
+    s = manager.create("smoke-rename")
+    for spk, txt in [("Голос-1", "первая"), ("Голос-2", "вторая"),
+                     ("Голос-1", "третья"), ("Голос-2", "четвёртая")]:
+        s.protocol.segments.append(Segment(channel=0, speaker=spk, speaker_auto=spk,
+                                           start=0.0, end=1.0, text=txt, text_original=txt))
+
+    n = s.rename_speaker("Голос-2", "Опрашивающий")
+    labels = [sg.speaker for sg in s.protocol.segments]
+    print(f"переименован один голос: обновлено {n}, метки {labels}")
+    assert n == 2, f"должны смениться ровно две реплики, а не {n}"
+    assert labels == ["Голос-1", "Опрашивающий", "Голос-1", "Опрашивающий"], labels
+
+    # Канальное переименование (основной режим) по-прежнему берёт весь канал.
+    m = s.set_speaker(0, "Следователь")
+    assert m == 4 and all(sg.speaker == "Следователь" for sg in s.protocol.segments), m
+    print("RENAME_SPEAKER OK ✅")
+
+
 def test_crosstalk_state_reset_across_cycles() -> None:
     """Регрессия: `CrossTalkScorer` держал `_loud_since` между заходами записи. Если предыдущий
     цикл заканчивался ровно в момент «канал 0 громче канала 1», метка оставалась в словаре
@@ -295,6 +323,7 @@ def main() -> None:
     print("\n--- эхо initial_prompt и заученные титры ---")
     test_prompt_echo_filter()
     test_prompt_has_no_recent_speech()
+    test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")
     test_crosstalk_state_reset_across_cycles()

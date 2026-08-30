@@ -240,6 +240,9 @@ class SpeakerReq(BaseModel):
     session_id: str
     channel: int
     label: str
+    # Текущая метка переименовываемого голоса. Задана — переименовываем именно его; не задана —
+    # прежнее поведение «весь канал» (микрофон-на-участника, где канал и есть спикер).
+    speaker: str | None = None
 
 
 @app.post("/api/speaker")
@@ -247,7 +250,10 @@ def set_speaker(req: SpeakerReq) -> dict:
     s = manager.get(req.session_id)
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
-    n = s.set_speaker(req.channel, req.label)
+    if req.speaker:
+        n = s.rename_speaker(req.speaker, req.label)
+    else:
+        n = s.set_speaker(req.channel, req.label)
     return {"updated": n, "label": req.label}
 
 

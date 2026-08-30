@@ -99,8 +99,34 @@ class Session:
         default = {0: "Интервьюер", 1: "Опрашиваемый"}.get(channel, f"Голос-{channel + 1}")
         return default
 
+    def rename_speaker(self, old_label: str, new_label: str) -> int:
+        """Переименовать КОНКРЕТНЫЙ голос по его текущей метке; вернуть число сегментов.
+
+        Отдельно от `set_speaker` (который работает по каналу), потому что после офлайн-
+        диаризации общего микрофона в одном канале лежат РАЗНЫЕ спикеры («Голос-1», «Голос-2»).
+        Переименование по каналу в этом случае схлопывало весь протокол в одну метку — реальный
+        баг: пользователь менял «Голос-2» на «Опрашивающий» и получал «Опрашивающий» у всех
+        реплик разом, включая чужие.
+        """
+        with self._lock:
+            n = 0
+            for seg in self.protocol.segments:
+                if seg.speaker == old_label and seg.speaker != new_label:
+                    seg.edits.append(Edit(field="speaker", old=seg.speaker, new=new_label))
+                    seg.speaker = new_label
+                    n += 1
+            # Пер-канальную метку двигаем только если канал целиком был этим голосом — иначе
+            # новые реплики этого канала унаследовали бы имя чужого спикера.
+            for ch, name in list(self.speaker_names.items()):
+                if name == old_label:
+                    self.speaker_names[ch] = new_label
+                    self.protocol.speaker_map[ch] = new_label
+            return n
+
     def set_speaker(self, channel: int, label: str) -> int:
-        """Переименовать спикера; вернуть число обновлённых сегментов."""
+        """Переименовать спикера ЦЕЛОГО канала; вернуть число обновлённых сегментов.
+        Основной режим (микрофон-на-участника), где канал и есть спикер. Для протокола после
+        диаризации нужен `rename_speaker` — там в канале несколько голосов."""
         with self._lock:
             self.speaker_names[channel] = label
             self.protocol.speaker_map[channel] = label

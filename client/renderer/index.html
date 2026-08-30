@@ -74,6 +74,7 @@
         <div class="rec-controls">
           <button id="startRec" class="rec">● Начать запись</button>
           <button id="stopRec" class="stop" disabled>■ Стоп</button>
+          <button id="diarizeBtn" class="ghost" title="Запись велась одним общим микрофоном: развести реплики по голосам (ECAPA + кластеризация). Не нужно, если у каждого участника свой микрофон — там голоса разделены самой записью.">👥 Разметить голоса</button>
           <button id="finalizeBtn" class="ghost">✨ Уточнить тайм-коды</button>
           <button id="saveBtn" class="ghost">💾 Сохранить</button>
         </div>
@@ -86,9 +87,6 @@
       </div>
 
       <div class="finalize-opts">
-        <label title="Если запись велась одним общим микрофоном — развести голоса по эмбеддингам">
-          <input type="checkbox" id="diarizeChk" /> Один общий микрофон (диаризация)
-        </label>
         <label>Ожидаемое число голосов
           <input type="number" id="numSpeakers" min="0" max="8" value="0" style="width:48px" />
           <span class="hint">0 = авто</span>

@@ -163,8 +163,8 @@ function checkMicsDistinct() {
   }
   if (!stereo && !$("mic1").value) {
     // Не ошибка, а осознанный режим — но напоминаем, чем разводить голоса потом.
-    warn.textContent = "ℹ Один микрофон: после записи включите «Один общий микрофон "
-                     + "(диаризация)» и нажмите «Уточнить тайм-коды»";
+    warn.textContent = "ℹ Один микрофон: после записи нажмите «Разметить голоса» — "
+                     + "реплики разведёт диаризация";
     warn.hidden = false;
     return true;
   }
@@ -575,6 +575,7 @@ function startRecording() {
     } else if (msg.type === "stopped") {
       state.flushed = true;
       $("finalizeBtn").disabled = false;
+      $("diarizeBtn").disabled = false;
       $("saveBtn").disabled = false;
     }
   };
@@ -588,6 +589,7 @@ function stopRecording() {
     // финализацию/сохранение, чтобы не потерять последние секунды разговора в протоколе.
     state.flushed = false;
     $("finalizeBtn").disabled = true;
+    $("diarizeBtn").disabled = true;
     $("saveBtn").disabled = true;
     state.ws.send(JSON.stringify({ type: "stop" }));
   }
@@ -661,7 +663,7 @@ function addSegment(seg) {
   sp.className = "seg-speaker " + speakerClass(seg.channel);
   sp.textContent = seg.speaker + ":";
   sp.title = "Клик — изменить метку голоса";
-  sp.onclick = () => openSpeakerModal(seg.channel);
+  sp.onclick = () => openSpeakerModal(seg.channel, seg.speaker);
 
   if (seg.likely_bleed) {
     wrap.classList.add("segment-bleed");
@@ -713,7 +715,10 @@ function addSegment(seg) {
   $("transcript").appendChild(wrap);
   $("transcript").scrollTop = $("transcript").scrollHeight;
 
-  state.segments.set(seg.id, { el: wrap, speakerEl: sp, channel: seg.channel, words, meta });
+  // speaker храним: переименование идёт ПО МЕТКЕ голоса (после диаризации в одном канале
+  // их несколько), и без неё нечего сравнивать при локальном обновлении ленты.
+  state.segments.set(seg.id, { el: wrap, speakerEl: sp, channel: seg.channel,
+                               speaker: seg.speaker, words, meta });
 }
 
 function applyBleedFlag(seg) {
@@ -755,18 +760,53 @@ function renderProtocol(protocol) {
   (protocol.segments || []).forEach(addSegment);
 }
 
+// Разметка голосов отдельной кнопкой, а не галочкой при «Уточнить тайм-коды». Это разные
+// операции с разной ценой и разным смыслом: тайм-коды уточняются всегда и никого не
+// переименовывают, а диаризация нужна только в режиме общего микрофона и переписывает метки
+// спикеров. Спрятанная в чекбокс, она была попросту незаметна.
+async function diarizeVoices() {
+  const btn = $("diarizeBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "⏳ Разметка…";
+  const num = parseInt($("numSpeakers").value, 10) || 0;
+  try {
+    const r = await fetch(`${HTTP}/api/finalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // align здесь НЕ трогаем: уточнение тайм-кодов — отдельная кнопка, и падение тяжёлой
+      // wav2vec2-модели не должно уносить с собой уже посчитанную разметку голосов.
+      body: JSON.stringify({
+        session_id: SESSION, align: false, diarize: true,
+        num_speakers: num > 0 ? num : null,
+      }),
+    }).then((x) => x.json());
+    if (r.error) {
+      alert("Не удалось разметить голоса: " + r.error);
+      return;
+    }
+    renderProtocol(r.protocol);
+    alert(`Готово — голосов найдено: ${r.speakers ?? "?"}.
+` +
+          "Метки «Голос-N» переименовываются кликом по имени слева от реплики.");
+  } catch (e) {
+    alert("Ошибка: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
 async function finalizeTimecodes() {
   const btn = $("finalizeBtn");
   btn.disabled = true;
   const prev = btn.textContent;
   btn.textContent = "⏳ Обработка…";
-  const diarize = $("diarizeChk").checked;
   const num = parseInt($("numSpeakers").value, 10) || 0;
   try {
     const r = await fetch(`${HTTP}/api/finalize`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        session_id: SESSION, align: true, diarize,
+        session_id: SESSION, align: true, diarize: false,
         num_speakers: num > 0 ? num : null,
       }),
     }).then((x) => x.json());
@@ -775,9 +815,7 @@ async function finalizeTimecodes() {
     } else {
       renderProtocol(r.protocol);
       await loadAudio();
-      const parts = [`тайм-коды: ${r.aligned_segments ?? 0} сегм.`];
-      if (diarize) parts.push(`голосов найдено: ${r.speakers ?? "?"}`);
-      alert("Готово — " + parts.join(", "));
+      alert(`Готово — тайм-коды уточнены: ${r.aligned_segments ?? 0} сегм.`);
     }
   } catch (e) {
     alert("Ошибка: " + e);
@@ -789,9 +827,11 @@ async function finalizeTimecodes() {
 
 // ---------- Маркировка спикеров ----------
 let modalChannel = null;
-function openSpeakerModal(channel) {
+let modalSpeaker = null;   // текущая метка голоса, по которой и переименовываем
+function openSpeakerModal(channel, speaker) {
   modalChannel = channel;
-  $("modalChannel").textContent = channel;
+  modalSpeaker = speaker || null;
+  $("modalChannel").textContent = speaker ? `«${speaker}»` : `канал ${channel}`;
   $("speakerInput").value = "";
   $("speakerModal").hidden = false;
 }
@@ -800,11 +840,22 @@ async function applySpeaker(label) {
   if (!label || modalChannel === null) return;
   await fetch(`${HTTP}/api/speaker`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label }),
+    // speaker — какой именно голос переименовываем. После диаризации общего микрофона в
+    // одном канале лежат разные спикеры, и переименование «по каналу» схлопнуло бы весь
+    // протокол в одну метку (реальный баг: «Голос-2» -> «Опрашивающий» у всех реплик).
+    body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label,
+                           speaker: modalSpeaker }),
   });
-  // обновляем все сегменты этого канала локально
+  // Локально обновляем ленту, не перезагружая протокол.
   state.segments.forEach((s) => {
-    if (s.channel === modalChannel) s.speakerEl.textContent = label + ":";
+    // Обновляем ровно те строки, что реально переименованы на сервере.
+    const wasLabel = modalSpeaker;
+    if (wasLabel) {
+      if (s.speaker === wasLabel) { s.speaker = label; s.speakerEl.textContent = label + ":"; }
+    } else if (s.channel === modalChannel) {
+      s.speaker = label;
+      s.speakerEl.textContent = label + ":";
+    }
   });
   $("speakerModal").hidden = true;
 }
@@ -844,6 +895,7 @@ function bind() {
   $("startRec").onclick = startRecording;
   $("stopRec").onclick = stopRecording;
   $("finalizeBtn").onclick = finalizeTimecodes;
+  $("diarizeBtn").onclick = diarizeVoices;
   $("saveBtn").onclick = () =>
     fetch(`${HTTP}/api/save`, {
       method: "POST", headers: { "Content-Type": "application/json" },
