@@ -20,6 +20,9 @@
       </label>
       <button id="refreshMics" class="ghost">⟳</button>
       <!-- Разбивка по голосам держится на том, что каналы пришли с разных микрофонов. -->
+      <label class="stereo-split" title="Оба микрофона в одном USB-адаптере: левый канал — интервьюер, правый — опрашиваемый. Проверить, что адаптер их разводит: py -3.11 -m app.test_mics">
+        <input type="checkbox" id="stereoSplit" /> стерео-вход: L и R — разные участники
+      </label>
       <span id="micWarn" class="mic-warn" hidden>⚠ Оба канала на одном микрофоне —
         разбивки по голосам не будет</span>
     </div>

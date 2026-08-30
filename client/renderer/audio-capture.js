@@ -77,6 +77,76 @@ class CaptureChannel {
   }
 }
 
+// Один стереовход -> два канала конвейера: левый = участник A, правый = участник B.
+// Нужно, когда оба микрофона воткнуты в ОДИН мини-USB адаптер: Windows показывает одно
+// устройство, и обычный путь (два CaptureChannel по deviceId) посадил бы оба канала на него же,
+// то есть записал бы одно и то же дважды. Здесь вместо двух устройств берётся одно, но
+// расщепляется по стереоканалам.
+//
+// Обязательно ВЫКЛЮЧЕНА обработка (echoCancellation/noiseSuppression/autoGainControl): она
+// сводит вход в моно, и стерео до нас просто не доедет — вместо двух участников получились бы
+// две одинаковые дорожки. Для микрофона-на-участника эта обработка и не нужна: эхо динамиков
+// здесь не пишется, а АРУ мешает кросс-канальному гейту сравнивать громкость каналов.
+//
+// Разведены ли микрофоны по L/R физически — вопрос к адаптеру, а не к коду: многие суммируют
+// оба капсюля в один сигнал. Проверяется до записи: `py -3.11 -m app.test_mics`.
+class StereoSplitCapture {
+  constructor(deviceId, ws, channels = [0, 1]) {
+    this.deviceId = deviceId;
+    this.ws = ws;
+    this.channels = channels;
+  }
+
+  async start() {
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: this.deviceId ? { exact: this.deviceId } : undefined,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 2,
+      },
+    });
+    const track = this.stream.getAudioTracks()[0];
+    const got = (track.getSettings && track.getSettings().channelCount) || 0;
+    if (got === 1) {
+      // Честнее упасть здесь, чем писать час и получить две одинаковые дорожки.
+      this.stop();
+      throw new Error("устройство отдало моно вместо стерео — расщеплять нечего");
+    }
+
+    this.ctx = new AudioContext();
+    const source = this.ctx.createMediaStreamSource(this.stream);
+    this.node = this.ctx.createScriptProcessor(4096, 2, 2);
+    const headers = this.channels.map((ch) => {
+      const h = new ArrayBuffer(4);
+      new DataView(h).setInt32(0, ch, true);
+      return new Uint8Array(h);
+    });
+
+    this.node.onaudioprocess = (e) => {
+      if (this.ws.readyState !== WebSocket.OPEN) return;
+      const n = Math.min(2, e.inputBuffer.numberOfChannels);
+      for (let i = 0; i < n; i++) {
+        const down = downsample(e.inputBuffer.getChannelData(i), this.ctx.sampleRate);
+        const pcm = floatTo16BitPCM(down);
+        const frame = new Uint8Array(4 + pcm.byteLength);
+        frame.set(headers[i], 0);
+        frame.set(new Uint8Array(pcm.buffer), 4);
+        this.ws.send(frame);
+      }
+    };
+    source.connect(this.node);
+    this.node.connect(this.ctx.destination);
+  }
+
+  stop() {
+    try { this.node && this.node.disconnect(); } catch (_) {}
+    try { this.stream && this.stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+    try { this.ctx && this.ctx.close(); } catch (_) {}
+  }
+}
+
 // Разовая запись с одного устройства в накопитель (для голосовых ответов анкеты).
 class OneShotRecorder {
   constructor(deviceId) {
@@ -255,4 +325,4 @@ class AutoRecorder {
   }
 }
 
-window.AudioCapture = { CaptureChannel, OneShotRecorder, AutoRecorder };
+window.AudioCapture = { CaptureChannel, StereoSplitCapture, OneShotRecorder, AutoRecorder };

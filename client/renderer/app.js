@@ -127,13 +127,23 @@ async function loadMics() {
   checkMicsDistinct();
 }
 
+// Устройство для разовой записи ответа анкеты (говорит опрашиваемый). В обычном режиме это
+// его собственный микрофон; в стерео-режиме второго устройства нет вовсе — оба участника
+// приходят одним входом, и селектор канала 1 отключён, поэтому берём тот, что выбран.
+function answerDeviceId() {
+  return $("stereoSplit").checked ? $("mic0").value : $("mic1").value;
+}
+
 // Канальная диаризация держится ровно на одном условии: каналы пришли с РАЗНЫХ микрофонов.
 // Если на обоих один вход, никакой алгоритм этого потом не разведёт — предупреждаем сразу,
 // а не после записи, когда протокол уже задвоился.
 function checkMicsDistinct() {
-  const same = $("mic0").value && $("mic0").value === $("mic1").value;
-  const warn = $("micWarn");
-  warn.hidden = !same;
+  const stereo = $("stereoSplit").checked;
+  // В стерео-режиме одно устройство — это норма, а не ошибка: участники разведены по L/R,
+  // а не по разным входам. Второй селектор в этом режиме не участвует.
+  $("mic1").disabled = stereo;
+  const same = !stereo && $("mic0").value && $("mic0").value === $("mic1").value;
+  $("micWarn").hidden = !same;
   return !same;
 }
 
@@ -217,7 +227,7 @@ function startAutoListening() {
   stopAutoListening();
   hideAutoBoxes();
   $("autoListenBox").hidden = false;
-  autoRec = new window.AudioCapture.AutoRecorder($("mic1").value, {});
+  autoRec = new window.AudioCapture.AutoRecorder(answerDeviceId(), {});
   autoRec.onSilence((hadSpeech) => {
     $("autoListenBox").hidden = true;
     if (hadSpeech) finishAutoListening();
@@ -464,7 +474,7 @@ async function toggleRecordAnswer() {
   if (!answerRec) {
     hideAutoBoxes();
     stopAutoListening();   // ручная запись — приоритет над автослушанием, если оно ещё идёт
-    answerRec = new window.AudioCapture.OneShotRecorder($("mic1").value);
+    answerRec = new window.AudioCapture.OneShotRecorder(answerDeviceId());
     await answerRec.start();
     btn.textContent = "⏹ Остановить";
     btn.style.background = "#c5384a"; btn.style.color = "#fff";
@@ -499,15 +509,29 @@ function startRecording() {
   state.ws.onopen = async () => {
     // Сессия создаётся сервером автоматически при подключении к сокету — отдельный
     // "start"-сигнал не нужен (сервер его и не обрабатывает).
-    const mics = [
-      { ch: 0, dev: $("mic0").value },
-      { ch: 1, dev: $("mic1").value },
-    ];
-    for (const m of mics) {
-      if (!m.dev) continue;
-      const cap = new window.AudioCapture.CaptureChannel(m.ch, m.dev, state.ws);
-      await cap.start();
+    if ($("stereoSplit").checked) {
+      // Оба микрофона в одном адаптере: расщепляем его стерео на каналы 0 и 1.
+      const cap = new window.AudioCapture.StereoSplitCapture($("mic0").value, state.ws);
+      try {
+        await cap.start();
+      } catch (e) {
+        alert("Стерео-режим не вышел: " + e.message +
+              "\nСнимите галочку «стерео-вход» либо проверьте адаптер: py -3.11 -m app.test_mics");
+        state.ws.close();
+        return;
+      }
       state.captures.push(cap);
+    } else {
+      const mics = [
+        { ch: 0, dev: $("mic0").value },
+        { ch: 1, dev: $("mic1").value },
+      ];
+      for (const m of mics) {
+        if (!m.dev) continue;
+        const cap = new window.AudioCapture.CaptureChannel(m.ch, m.dev, state.ws);
+        await cap.start();
+        state.captures.push(cap);
+      }
     }
     state.recording = true;
     state.flushed = true;
@@ -804,6 +828,7 @@ function bind() {
   $("refreshMics").onclick = loadMics;
   $("mic0").onchange = checkMicsDistinct;
   $("mic1").onchange = checkMicsDistinct;
+  $("stereoSplit").onchange = checkMicsDistinct;
   $("modelSelect").onchange = onModelChange;
   $("audio").addEventListener("timeupdate", onTimeUpdate);
 
