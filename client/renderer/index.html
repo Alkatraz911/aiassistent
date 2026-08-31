@@ -32,11 +32,14 @@
     <!-- Левая колонка: ассистент + анкета -->
     <section class="col left">
       <h2>AI-ассистент · Анкета</h2>
+      <label class="section-label" for="templateSelect">Тип мероприятия (шаблон протокола)</label>
       <div class="template-row">
         <select id="templateSelect"></select>
         <button id="newTemplateBtn" class="ghost">+ Новый</button>
         <button id="editTemplateBtn" class="ghost">✎ Редактировать</button>
       </div>
+      <p class="hint">Выберите шаблон до начала анкеты — по нему пройдёт голосовой опрос и в конце
+        сформируется итоговый .docx.</p>
       <div id="assistantBox" class="assistant">
         <p class="hint">Нажмите «Начать анкету», ассистент задаст вопросы голосом.</p>
         <div class="assistant-prompt" id="assistantPrompt"></div>
@@ -66,6 +69,8 @@
         <tbody></tbody>
       </table>
     </section>
+
+    <div id="splitter" class="splitter" title="Перетащите, чтобы изменить ширину панелей"></div>
 
     <!-- Правая колонка: протокол диалога -->
     <section class="col right">

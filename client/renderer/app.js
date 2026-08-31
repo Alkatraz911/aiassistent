@@ -418,8 +418,10 @@ function stepRowTemplate(step) {
                value="${escAttr(step.placeholder || "")}" />
       </label>
     </div>
-    <textarea class="step-statement" placeholder="Текст для зачитывания (разъяснение, опционально)">${step.statement || ""}</textarea>
-    <textarea class="step-question" placeholder="Вопрос (если нужен ответ)">${step.question || ""}</textarea>
+    <div class="step-texts">
+      <textarea class="step-statement" placeholder="Текст для зачитывания (разъяснение, опционально)">${step.statement || ""}</textarea>
+      <textarea class="step-question" placeholder="Вопрос (если нужен ответ)">${step.question || ""}</textarea>
+    </div>
   `;
   row.querySelector(".step-kind").value = step.kind || "field";
   row.querySelector(".step-extractor").value = step.extractor || "plain";
@@ -1018,6 +1020,37 @@ async function generateProtocolDocx() {
   }
 }
 
+// ---------- перетаскиваемая граница между анкетой и протоколом диалога ----------
+const SPLITTER_MIN = 300;      // ужать анкету настолько, чтобы поля ещё влезали без переноса
+const SPLITTER_STORAGE_KEY = "protocolAssistant.leftWidth";
+
+function initSplitter() {
+  const saved = Number(localStorage.getItem(SPLITTER_STORAGE_KEY));
+  if (saved) document.documentElement.style.setProperty("--left-width", saved + "px");
+
+  const splitter = $("splitter");
+  const main = document.querySelector("main");
+  splitter.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    splitter.classList.add("dragging");
+    const onMove = (ev) => {
+      const rect = main.getBoundingClientRect();
+      const max = rect.width - SPLITTER_MIN;   // правой колонке тоже нужен минимум места
+      const w = Math.min(Math.max(ev.clientX - rect.left, SPLITTER_MIN), max);
+      document.documentElement.style.setProperty("--left-width", w + "px");
+    };
+    const onUp = () => {
+      splitter.classList.remove("dragging");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      const w = getComputedStyle(document.documentElement).getPropertyValue("--left-width");
+      if (w) localStorage.setItem(SPLITTER_STORAGE_KEY, parseInt(w, 10));
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
 // ---------- bind ----------
 function bind() {
   $("startAssistant").onclick = startAssistant;
@@ -1068,6 +1101,7 @@ function bind() {
 }
 
 bind();
+initSplitter();
 checkHealth();
 loadMics();
 loadModels();

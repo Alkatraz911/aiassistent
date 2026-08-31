@@ -22,10 +22,27 @@ body {
 .mics label { display: flex; flex-direction: column; gap: 3px; }
 .mics select { min-width: 180px; padding: 3px; }
 
-main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 0; overflow: hidden; }
-.col { padding: 16px; overflow-y: auto; }
-.left { background: #f7f9fc; border-right: 1px solid #d9dfea; }
+main {
+  flex: 1; display: grid; grid-template-columns: var(--left-width, 420px) 6px 1fr;
+  gap: 0; overflow: hidden;
+}
+/* min-width: 0 — без этого грид-колонка не сжимается уже своего содержимого (стандартная
+   особенность CSS Grid), и любой не переносящийся ряд кнопок/полей раздувает всю страницу
+   вширь, вызывая горизонтальный скролл всего окна, а не только этой колонки. */
+.col { padding: 16px; overflow-y: auto; overflow-x: hidden; min-width: 0; }
+.left { background: #f7f9fc; }
 .right { background: #fff; display: flex; flex-direction: column; }
+.section-label { display: block; font-size: 12px; font-weight: 600; color: #44507a; margin-bottom: 4px; }
+
+/* Перетаскиваемая граница между анкетой и протоколом диалога — ширину запоминаем в localStorage
+   (см. initSplitter в app.js), чтобы не настраивать заново при каждом запуске. */
+.splitter {
+  background: #d9dfea; cursor: col-resize; position: relative;
+}
+.splitter:hover, .splitter.dragging { background: #aab6cf; }
+.splitter::after {
+  content: ""; position: absolute; inset: 0 -3px; /* чуть шире хитбокс для удобного захвата */
+}
 h2 { margin: 0 0 12px; font-size: 16px; }
 h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: #66718c; margin: 18px 0 8px; }
 .hint { color: #8a93a8; font-size: 12px; }
@@ -77,8 +94,8 @@ table.fields td.k { color: #66718c; width: 42%; }
 table.fields td.v { font-weight: 500; }
 td.v.filled { color: #1f7a45; }
 
-.protocol-head { display: flex; justify-content: space-between; align-items: center; }
-.rec-controls { display: flex; gap: 8px; }
+.protocol-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.rec-controls { display: flex; gap: 8px; flex-wrap: wrap; }
 .player { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
 .player audio { height: 34px; }
 .finalize-opts { display: flex; gap: 18px; align-items: center; font-size: 12px; color: #54607a; margin-bottom: 8px; }
@@ -133,7 +150,11 @@ td.v.filled { color: #1f7a45; }
 .modal-card .presets button { background: #e3e8f2; color: #2b3550; }
 .modal-card input { width: 100%; padding: 8px; border: 1px solid #cfd6e4; border-radius: 7px; margin-bottom: 10px; }
 
-.modal-card-wide { width: 640px; max-height: 84vh; overflow-y: auto; }
+.modal-card-wide { width: min(1320px, 94vw); max-height: 88vh; overflow-y: auto; }
+/* Два текстовых поля шага (statement/question) кладём рядом, а не друг под другом — на широкой
+   модалке одна длинная колонка текста выглядит так же тесно, как раньше выглядела вся модалка. */
+.step-row .step-texts { display: flex; gap: 10px; }
+.step-row .step-texts textarea { flex: 1; margin-bottom: 0; }
 .template-steps { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
 .step-row {
   border: 1px solid #dde3ee; border-radius: 8px; padding: 10px; background: #f7f9fc;
@@ -151,6 +172,6 @@ td.v.filled { color: #1f7a45; }
 .step-row .step-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; color: #66718c; margin-bottom: 6px; }
 .step-row .step-meta label { display: flex; align-items: center; gap: 4px; }
 .step-row .step-meta input.step-placeholder {
-  width: 190px; padding: 4px 6px; border: 1px solid #cfd6e4; border-radius: 5px;
+  width: 240px; padding: 4px 6px; border: 1px solid #cfd6e4; border-radius: 5px;
   font-size: 12px; margin-bottom: 0;
 }
