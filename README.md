@@ -24,6 +24,9 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
 
 - `backend/` — Python 3.11, FastAPI, faster-whisper. См. `backend/README.md`.
 - `client/`  — Electron-приложение. См. `client/README.md`.
+- `backend/app/transcribe_files.py` — отдельный CLI-клиент для готовых записей: пакетная
+  расшифровка длинных файлов (m4a с диктофона и т.п.) в текст с разбивкой по голосам, без
+  сервера и UI. См. `backend/README.md`, «Расшифровка готовых записей».
 
 ## Быстрый старт
 
@@ -33,6 +36,8 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
    py -3.11 -m venv .venv
    .\.venv\Scripts\Activate.ps1
    pip install -r requirements.txt
+   # на NVIDIA-карте — добавить GPU-зависимости (устройство определится само):
+   #   pip install -r requirements-gpu.txt
    # быстрый прогон UI без модели:  $env:ASR_PROVIDER="stub"
    uvicorn app.main:app --host 127.0.0.1 --port 8000
    ```
@@ -42,6 +47,13 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
    npm install
    npm start
    ```
+3. Расшифровка готовых записей (сервер и Electron не нужны):
+   ```powershell
+   cd backend
+   .\.venv\Scripts\python.exe -m app.transcribe_files "C:\rec\допрос.m4a" --speakers 2
+   ```
+   Текст ляжет рядом с записью — `допрос.txt`. Пошагово (зависимости, папки и маски, форматы,
+   возобновление после обрыва) — `backend/README.md`, «Расшифровка готовых записей».
 
 ## Статус MVP
 
@@ -54,3 +66,9 @@ Electron-клиент  ──WebSocket(PCM)──►  FastAPI backend (Python 3.
 - [x] Привязка аудио↔текст (клик по слову → перемотка, подсветка)
 - [x] AI-ассистент: сценарий анкеты, заполнение полей из ответов
 - [x] Хранение протокола (JSON) + фонограммы (WAV), слой аудита правок
+- [x] GPU-режим: автоопределение устройства, `large-v3` в реальном времени,
+  GPU-финализация (alignment + диаризация) — см. `backend/README.md` «Запуск на GPU»
+- [x] Пакетная расшифровка готовых записей в текстовые файлы (длинные m4a, блочная обработка,
+  возобновление после обрыва, разбивка по голосам) — `app/transcribe_files.py`
+- [x] Защита от галлюцинаций: зацикливание, эхо `initial_prompt` на не-речи, заученные титры
+  YouTube — три независимых пост-фильтра по тексту (пороги уверенности их не ловят)

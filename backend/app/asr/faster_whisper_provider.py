@@ -1,22 +1,47 @@
-"""ASR на faster-whisper (CTranslate2). Без torch, работает на CPU и GPU."""
+"""ASR на faster-whisper (CTranslate2). Без torch, работает на CPU и GPU.
+
+GPU-специфика собрана в трёх местах и везде это разные механизмы, а не одна «галочка cuda»:
+  • `__init__` — `num_workers`/`device_index` (параллелизм внутри модели, см. config).
+  • `_decode` — выбор между обычным и батчевым проходом для длинного аудио.
+  • `app/device.py` — чтобы CTranslate2 вообще нашёл cuBLAS/cuDNN на Windows.
+"""
 from __future__ import annotations
 
 import numpy as np
 
 from .. import config
-from .base import ASRProvider, ASRResult, ASRWord, has_repeating_ngram
+from .base import ASRProvider, ASRResult, ASRWord, dropped_note, hallucination_reason
 
 
 class FasterWhisperASR(ASRProvider):
     def __init__(self, model: str | None = None, device: str | None = None,
                  compute: str | None = None) -> None:
+        # ДО импорта faster_whisper: подмешать в пути поиска DLL каталоги pip-пакетов
+        # nvidia-cublas-cu12 / nvidia-cudnn-cu12, иначе на Windows CTranslate2 не найдёт
+        # cublas64_12.dll при полностью исправной установке (см. app/device.py).
+        from .. import device as device_mod
+        device_mod.ensure_cuda_dlls()
         from faster_whisper import WhisperModel
 
         self.model_name = model or config.WHISPER_MODEL
         self.device = device or config.WHISPER_DEVICE
         self.compute = compute or config.WHISPER_COMPUTE
+        self.is_gpu = self.device.startswith("cuda")
+        self._batched = None      # BatchedInferencePipeline, лениво (см. _batched_pipeline)
         kwargs = {}
-        if self.device == "cpu" and config.WHISPER_CPU_THREADS > 0:
+        if config.WHISPER_DOWNLOAD_ROOT:
+            # Веса — в каталог проекта, а не в кеш профиля (см. config.WHISPER_DOWNLOAD_ROOT).
+            # Скачиваются один раз: huggingface_hub при попадании в кеш сеть не трогает вовсе.
+            kwargs["download_root"] = config.WHISPER_DOWNLOAD_ROOT
+        if self.is_gpu:
+            # Какие карты (при нескольких GPU) и сколько параллельных исполнителей внутри модели.
+            # Без num_workers>1 конкурентные вызовы transcribe() из разных потоков планировщика
+            # сериализуются очередью CTranslate2 — второй канал ждёт первый, хотя карта свободна.
+            kwargs["device_index"] = (config.WHISPER_DEVICE_INDEX
+                                      if len(config.WHISPER_DEVICE_INDEX) > 1
+                                      else (config.WHISPER_DEVICE_INDEX or [0])[0])
+            kwargs["num_workers"] = max(1, config.WHISPER_NUM_WORKERS)
+        elif self.device == "cpu" and config.WHISPER_CPU_THREADS > 0:
             # По умолчанию ctranslate2 сам разбирает почти все ядра под ОДИН вызов transcribe().
             # При нескольких worker-потоках планировщика (ASR_WORKER_THREADS > 1) это приводит к
             # переподписке: два конкурентных вызова начинают драться за одни и те же ядра и
@@ -46,7 +71,9 @@ class FasterWhisperASR(ASRProvider):
             if peak > 1e-4:
                 audio = (audio * (0.95 / peak)).astype(np.float32)
 
-        segments, info = self.model.transcribe(
+        prompt = (initial_prompt if initial_prompt is not None
+                  else (config.WHISPER_PROMPT or None))
+        segments, info = self._decode(
             audio,
             language=config.WHISPER_LANGUAGE,
             word_timestamps=True,
@@ -67,8 +94,7 @@ class FasterWhisperASR(ASRProvider):
             # «Редактор субтитров...») — подавляет декодирование сегментов, идущих сразу за
             # тишиной длиннее порога, вместо того чтобы пытаться что-то там расслышать.
             hallucination_silence_threshold=config.WHISPER_HALLUCINATION_SILENCE_S,
-            initial_prompt=(initial_prompt if initial_prompt is not None
-                             else (config.WHISPER_PROMPT or None)),
+            initial_prompt=prompt,
         )
 
         words: list[ASRWord] = []
@@ -89,14 +115,88 @@ class FasterWhisperASR(ASRProvider):
         # Здесь — фактическая проверка результата, а не догадка на входе: если текст выглядит как
         # зацикленный повтор, считаем это тем же, что и «речь не распознана» (пустой результат),
         # а не пропускаем в протокол.
-        if has_repeating_ngram(text):
+        # Три независимых пост-фильтра, каждый ловит свой класс галлюцинаций, который не
+        # ловится ни порогами уверенности, ни VAD (все три случая наблюдались на реальных
+        # записях — подробности в докстрингах в base.py):
+        #   • зацикливание («Ветка. Ветка. Ветка...»),
+        #   • эхо самого initial_prompt на не-речи (самый частый),
+        #   • заученные титры YouTube («Редактор субтитров...», «Субтитры сделал ...»).
+        # Во всех трёх случаях результат приравнивается к «речь не распознана»: сегмент не
+        # создаётся. Фонограмма при этом пишется всегда — потерять звук нельзя, а вот пустить
+        # выдуманную фразу в протокол опроса нельзя тем более.
+        # Сравниваем с СТАТИЧЕСКИМ промптом, а не с тем, что реально ушло в модель. В живой
+        # сессии `initial_prompt` — это config.WHISPER_PROMPT плюс последние распознанные слова
+        # канала (Session._build_prompt), и проверять эхо по нему нельзя: в допросе опрашиваемый
+        # постоянно повторяет формулировку вопроса («Были ли вы там пятнадцатого марта?» — «Был
+        # там пятнадцатого марта»), и такая — совершенно настоящая — реплика оказалась бы
+        # подпоследовательностью недавнего контекста и была бы выброшена. Эхо же приходит именно
+        # от неизменной доменной подсказки: продолжать на не-речи декодеру больше нечего.
+        reason = hallucination_reason(text, config.WHISPER_PROMPT)
+        if reason:
+            print(dropped_note("провайдер", reason, text))
             return ASRResult(text="", words=[], language=info.language)
 
         return ASRResult(text=text, words=words, language=info.language)
 
+    def _decode(self, audio: np.ndarray, **kwargs):
+        """Один проход декодирования: обычный или батчевый.
+
+        Батчевый (`BatchedInferencePipeline`) режет аудио по VAD и считает получившиеся куски
+        ОДНИМ батчем: 1.2x на 10с, до 2.3x на 77с. По умолчанию ВЫКЛЮЧЕН — он молча выбрасывает
+        `hallucination_silence_threshold` и лестницу температур (обоснование в config.py,
+        `ASR_BATCH_ENABLED`). Порог `ASR_BATCH_MIN_S` — потому что на коротком куске батчить
+        нечего; на CPU выигрыша нет вовсе.
+
+        Сигнатуры у обоих путей совпадают (батчевый берёт те же kwargs плюс `batch_size`), но
+        защиты от галлюцинаций в батчевом режиме РАВНОЗНАЧНЫМИ НЕ ОСТАЮТСЯ: собирая
+        `TranscriptionOptions`, он молча подменяет два наших параметра (faster_whisper 1.1.0,
+        transcribe.py:490-505) — `hallucination_silence_threshold=None` и лестницу температур на
+        `temperature[:1]`, то есть на голый 0.0. Работает только VAD. Исключения при этом нет,
+        текст просто тихо становится хуже; предупреждение печатает `_batched_pipeline`.
+        """
+        duration_s = audio.size / float(config.SAMPLE_RATE)
+        if (config.ASR_BATCH_ENABLED and self.is_gpu
+                and duration_s >= config.ASR_BATCH_MIN_S):
+            return self._batched_pipeline().transcribe(
+                audio, batch_size=config.ASR_BATCH_SIZE, **kwargs)
+        return self.model.transcribe(audio, **kwargs)
+
+    def _batched_pipeline(self):
+        """Ленивое создание батчевого конвейера — он оборачивает уже загруженную модель и
+        отдельных весов не держит, но создавать его на CPU-провайдере незачем.
+
+        Без лока: гонка двух worker-потоков планировщика здесь безобидна (в худшем случае
+        создадутся две обёртки над одной моделью, лишняя тут же станет мусором) — в отличие от
+        `ModelManager.acquire`, где параллельная загрузка ОДНОЙ модели реально ломалась."""
+        if self._batched is None:
+            from faster_whisper import BatchedInferencePipeline
+            # Формулировка без привязки к ASR_BATCH_ENABLED: тот же конвейер берёт пакетный
+            # проход (`--batch`, batch/pipeline.py), где переменная ни при чём.
+            print("[asr] ВНИМАНИЕ: включён батчевый проход — в нём перестают действовать "
+                  "hallucination_silence_threshold и лестница температур "
+                  "(ограничение faster-whisper, см. config.py / ASR_BATCH_ENABLED)")
+            self._batched = BatchedInferencePipeline(model=self.model)
+        return self._batched
+
     def warmup(self) -> None:
-        silence = np.zeros(config.SAMPLE_RATE, dtype=np.float32)
-        try:
-            self.transcribe(silence, config.SAMPLE_RATE)
-        except Exception:
-            pass
+        """Прогрев: провести через модель реальный проход декодирования, а не просто загрузить веса.
+
+        Прогрев тишиной (как было) на GPU почти бесполезен: `vad_filter=True` вырезает тишину
+        целиком, декодер не запускается ни разу — и первую же настоящую реплику пользователь
+        ждёт вместе с ленивой инициализацией CUDA-модулей и автотюном cuDNN. Поэтому гоним шум
+        с ЯВНО выключенным VAD: качество результата здесь не важно (он выбрасывается), важно,
+        что путь encoder->decoder реально исполнится.
+
+        Ошибки НЕ глотаем (раньше глотали). Типовой отказ GPU — отсутствующая cuBLAS/cuDNN —
+        проявляется не при создании `WhisperModel` (оно проходит успешно), а при первом
+        декодировании, то есть ровно здесь. Проглоченное исключение означало бы «модель
+        загружена и прогрета» в логе старта и падение КАЖДОЙ реальной реплики потом; вместо
+        этого пусть преполёт (`main.py::_preflight`) увидит отказ и откатится на CPU.
+        """
+        rng = np.random.default_rng(0)
+        noise = (rng.standard_normal(config.SAMPLE_RATE) * 0.05).astype(np.float32)
+        segments, _ = self.model.transcribe(
+            noise, language=config.WHISPER_LANGUAGE, vad_filter=False,
+            beam_size=1, without_timestamps=True,
+        )
+        list(segments)              # transcribe ленив: без обхода генератора decode не случится

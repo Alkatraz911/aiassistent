@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from . import device
+
 # Протокол Xet у Hugging Face часто блокируется корпоративными сетями и вешает
 # загрузку модели. Принудительно используем классический HTTPS-путь.
 # Должно быть выставлено ДО первого импорта huggingface_hub / faster_whisper.
@@ -22,15 +24,51 @@ SAMPLE_RATE = 16_000
 # Выбор движка ASR: "faster_whisper" (боевой) или "stub" (быстрый прогон UI).
 ASR_PROVIDER = os.getenv("ASR_PROVIDER", "faster_whisper")
 
+# Устройство. "auto" (дефолт) — cuda, если CTranslate2 её видит, иначе cpu. Явные "cuda"/"cpu"
+# берутся как есть, без проверки: догадываться за пользователя тут нечего. Если GPU при этом не
+# поднимется, преполёт (`main.py::_preflight`) откатит на CPU — но с причиной в `/api/health`,
+# а не молча.
+WHISPER_DEVICE_REQUESTED = os.getenv("WHISPER_DEVICE", "auto")
+WHISPER_DEVICE = device.resolve_device(WHISPER_DEVICE_REQUESTED)
+IS_GPU = WHISPER_DEVICE.startswith("cuda")
+
+
+def _is_gpu(device_name: str | None = None) -> bool:
+    """`IS_GPU`, но для явно переданного устройства. Нужно там, где устройство после импорта
+    меняется (откат преполёта на CPU) — см. `asr_overload_lag_ms`."""
+    return (device_name or WHISPER_DEVICE).startswith("cuda")
+
+
+# Какие карты использовать: "0" или "0,1" при нескольких GPU (CTranslate2 device_index).
+WHISPER_DEVICE_INDEX = [int(x) for x in os.getenv("WHISPER_DEVICE_INDEX", "0").split(",") if x.strip()]
+
 # Параметры faster-whisper.
-# small — компромисс, реально пригодный для live-стриминга на CPU (см. ASR_OVERLOAD_LAG_MS
-# и backend/README.md «Производительность»): на измеренном CPU medium/turbo/large-v3 декодируют
-# МЕДЛЕННЕЕ реального времени (0.7x/0.5x), из-за чего задержка финала растёт без ограничения при
-# двух одновременных каналах. medium/turbo/large-v3 стоит использовать на GPU или для офлайн
-# `/api/finalize` (уже есть выбор модели из UI, Блок 4 — можно переключиться на сессию вручную).
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")          # small/medium/turbo/large-v3
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")          # cpu / cuda
-WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")       # int8 / float16
+# Дефолт модели зависит от устройства — это разные режимы работы, а не одна настройка:
+#   • CPU: small — компромисс, реально пригодный для live-стриминга (см. ASR_OVERLOAD_LAG_MS и
+#     backend/README.md «Производительность»): на измеренном CPU medium/turbo/large-v3 декодируют
+#     МЕДЛЕННЕЕ реального времени (0.7x/0.5x), из-за чего задержка финала растёт без ограничения
+#     при двух одновременных каналах.
+#   • GPU: large-v3 — на GPU тяжёлая модель идёт кратно быстрее реального времени, и держать
+#     small там незачем: это была уступка слабому железу, а не выбор по качеству.
+# Память: large-v3 в float16 занимает ~3 ГБ VRAM; при ASR_MAX_CACHED_MODELS=2 и переключении
+# моделей из UI держатся две сразу — на картах с 8 ГБ и меньше ставьте ASR_MAX_CACHED_MODELS=1.
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3" if IS_GPU else "small")
+# На какую модель откатываться, если GPU просили, а он не поднялся (см. main.py::_preflight):
+# large-v3 на CPU не тянет live вовсе, поэтому откат — это откат и по устройству, и по модели.
+WHISPER_MODEL_CPU_FALLBACK = os.getenv("WHISPER_MODEL_CPU_FALLBACK", "small")
+# Куда качаются веса whisper. По умолчанию — В ПРОЕКТ, рядом с моделью диаризатора
+# (`models/ecapa`), а не в общий кеш huggingface в профиле пользователя. Кеш профиля переживает
+# переустановку проекта, но не переезд: на другой машине, под другим пользователем или у службы
+# Windows (свой профиль) все веса качаются заново — 3 ГБ на large-v3 перед первой же записью.
+# Каталог `models/` лежит в .gitignore: веса не версионируются, но и не разбегаются по профилям.
+# Пустая строка возвращает поведение huggingface по умолчанию (общий кеш ~/.cache/huggingface).
+# Уже скачанное переносится без перекачки — структура каталогов внутри та же:
+#   move %USERPROFILE%\.cache\huggingface\hub\models--Systran--faster-whisper-*  backend\models\whisper
+WHISPER_DOWNLOAD_ROOT = os.getenv("WHISPER_DOWNLOAD_ROOT", str(BASE_DIR / "models" / "whisper"))
+# int8 — для CPU (там это главный ускоритель). На GPU float16 и быстрее, и точнее int8: тензорные
+# ядра считают fp16 нативно, а int8 на GPU требует квантования с потерей качества без выигрыша.
+# int8_float16 — компромисс для карт с малым VRAM (модель весит вдвое меньше, скорость близка).
+WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "float16" if IS_GPU else "int8")
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "ru")
 WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))  # 5 = качество, 1 = скорость
 # Лестница температур для fallback при зацикливании/низкой уверенности (compression_ratio /
@@ -48,6 +86,25 @@ ALIGN_MODEL = os.getenv("ALIGN_MODEL", "jonatasgrosman/wav2vec2-large-xlsr-53-ru
 # Офлайн-диаризация для одного общего микрофона (без токенов): ECAPA + кластеризация.
 # Порог косинусного расстояния для авто-режима (когда число голосов не задано).
 DIARIZE_THRESHOLD = float(os.getenv("DIARIZE_THRESHOLD", "0.55"))
+# Устройство для офлайн-финализации (alignment + диаризация). Это torch, а не CTranslate2, —
+# отдельная переменная: CUDA-сборка torch ставится отдельно от CUDA-библиотек faster-whisper,
+# и вполне рабочая конфигурация — ASR на GPU, а finalize на CPU (torch остался CPU-сборкой).
+# "auto" — cuda, если torch её видит, иначе cpu (проверяется лениво, при первой загрузке модели).
+FINALIZE_DEVICE = os.getenv("FINALIZE_DEVICE", "auto")
+# Сколько последних распознанных слов канала дописывать к промпту как контекст (0 — не
+# дописывать). Раньше дописывалось 60 безусловно — и это оказалось прямым источником самой
+# неприятной галлюцинации: на фоновом шуме модель выдавала обратно ПРЕДЫДУЩИЕ реплики.
+# Замер на живой записи, тихие окна по 3с, large-v3:
+#     промпт + недавнее -> «Миша, сколько тебе лет?», «Я вам обещала.», «Луна.»
+#     только домен      -> «» (пусто)
+#     без промпта       -> «» (пусто)
+# То есть модель дословно возвращала то, что мы сами ей и подсунули, а в протоколе это выглядело
+# как настоящий повтор вопроса — фильтром по тексту такое не отличить от живого повтора (в допросе
+# опрашиваемый постоянно повторяет формулировку вопроса), поэтому лечится только здесь, у истока.
+# Заодно это снимает противоречие: декодирование и так идёт с condition_on_previous_text=False
+# («контекст внутри чанка не нужен»), а контекст всё равно протаскивался через initial_prompt.
+ASR_PROMPT_RECENT_WORDS = int(os.getenv("ASR_PROMPT_RECENT_WORDS", "0"))
+
 # Подсказка домена смещает распознавание (можно дополнить терминами вашей предметной области).
 WHISPER_PROMPT = os.getenv(
     "WHISPER_PROMPT",
@@ -91,10 +148,33 @@ VAD_ENERGY_THRESHOLD = float(os.getenv("VAD_ENERGY_THRESHOLD", "0.008"))  # ми
 VAD_SPEECH_MARGIN_DB = float(os.getenv("VAD_SPEECH_MARGIN_DB", "6.0"))
 
 # Real-time streaming ASR: частота partial-обновлений текста, независимая от эндпоинтинга.
-ASR_UPDATE_MS = int(os.getenv("ASR_UPDATE_MS", "900"))         # целевой каданс (не жёсткий таймер)
+# Это НИЖНЯЯ ГРАНИЦА интервала, а не обещание: session.py берёт max(ASR_UPDATE_MS, lag_ema*1.3),
+# поэтому реальный каданс всё равно диктует скорость декодирования. Замер на GPU (RTX 3080,
+# два канала, окно 12с) показывает, что решает именно ВЫБОР МОДЕЛИ, а не эта переменная:
+#     large-v3 -> раунд ~1.2с (400 мс недостижимы, каданс растянется до ~1.6с)
+#     turbo    -> раунд ~0.5с (вот здесь 400 мс уже работают)
+# Отсюда и значение: на GPU держим границу низкой, чтобы лёгкая модель могла обновлять текст так
+# часто, как реально успевает, а тяжёлая просто упёрлась в своё время декодирования. На CPU
+# низкая граница смысла не имеет — там не успевает ни одна модель.
+_ASR_UPDATE_MS_ENV = os.getenv("ASR_UPDATE_MS")
+
+
+def asr_update_ms(device_name: str | None = None) -> int:
+    """Каданс партиалов для КОНКРЕТНОГО устройства (см. `asr_overload_lag_ms` — там же почему)."""
+    if _ASR_UPDATE_MS_ENV:
+        return int(_ASR_UPDATE_MS_ENV)
+    return 400 if _is_gpu(device_name) else 900
+
+
+ASR_UPDATE_MS = asr_update_ms()      # значение под устройство, определившееся при импорте
 ASR_WINDOW_MS = int(os.getenv("ASR_WINDOW_MS", "12000"))       # окно RollingBuffer для partial-decode
 ASR_LOOKBACK_MS = int(os.getenv("ASR_LOOKBACK_MS", "2000"))    # контекст до committed_boundary
-WHISPER_BEAM_SIZE_PARTIAL = int(os.getenv("WHISPER_BEAM_SIZE_PARTIAL", "1"))  # партиалы — быстрее
+# Партиалы считаем beam=1 (жадно) — и на CPU, и на GPU. Соблазн поднять beam на GPU («там же
+# быстро») проверен и отвергнут: на large-v3, окно 12с, beam 1/2/3/5 дал 0.63/0.77/0.78/0.80с
+# при ОДИНАКОВОМ распознанном тексте. То есть +22% к задержке партиала за неподтверждённую
+# надежду на более стабильную гипотезу. Партиал по определению черновик — его уточняет финал
+# (WHISPER_BEAM_SIZE=5), а до тех пор дешевле обновить его ещё раз, чем считать точнее.
+WHISPER_BEAM_SIZE_PARTIAL = int(os.getenv("WHISPER_BEAM_SIZE_PARTIAL", "1"))
 
 # Кэш ASR-моделей (backend/app/asr/model_manager.py) — сколько моделей одновременно держим
 # в памяти при переключении из UI (Блок 4 плана).
@@ -114,8 +194,65 @@ ASR_WORKER_THREADS = int(os.getenv("ASR_WORKER_THREADS", "2"))
 WHISPER_CPU_THREADS = int(os.getenv(
     "WHISPER_CPU_THREADS", str(max(1, (os.cpu_count() or 4) // max(1, ASR_WORKER_THREADS)))))
 
+# Число параллельных исполнителей ВНУТРИ модели (CTranslate2 num_workers). Напрашивающийся
+# GPU-аналог деления ядер: пусть два канала декодируются одновременно, а не встают в очередь
+# CTranslate2 гуськом. Замер это опроверг — на RTX 3080 / large-v3, два канала по окну 12с:
+#     num_workers=1 -> wall 1.67с   num_workers=2 -> 2.04с   num_workers=3 -> 2.15с
+# То есть чем больше «параллелизма», тем МЕДЛЕННЕЕ. Причина: одна большая модель уже насыщает
+# карту, свободных SM под второй поток нет, и настоящая одновременность даёт только накладные
+# расходы на переключение и вытеснение кэша — тогда как последовательное исполнение той же
+# работы идеально эффективно. Это ровно тот же вывод, что и на CPU (WHISPER_CPU_THREADS выше),
+# просто по другой причине, и он НЕ переносится автоматически на лёгкую модель + большую карту:
+# там карта может быть недогружена, и 2 способны выиграть. Проверять — `py -3.11 -m app.test_gpu`.
+WHISPER_NUM_WORKERS = int(os.getenv("WHISPER_NUM_WORKERS", "1"))
+
+# Батчинг длинного аудио (faster-whisper BatchedInferencePipeline): длинный кусок режется по VAD
+# и декодируется ОДНИМ батчем. По скорости работает (замер на large-v3/RTX 3080: 1.2x на 10с,
+# 1.4-1.9x на 30с, 2.3x на 77с), но ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН, и вот почему.
+#
+# `BatchedInferencePipeline.transcribe()` принимает те же параметры, что обычный, но два из них
+# МОЛЧА ВЫБРАСЫВАЕТ (faster_whisper/transcribe.py, сборка TranscriptionOptions):
+#     hallucination_silence_threshold=None    — жёстко, наш параметр игнорируется
+#     temperatures=temperature[:1]            — лестница обрезается до [0.0]
+# То есть ровно те две защиты, которые в этом проекте ставились по итогам реальных разборов
+# галлюцинаций (см. faster_whisper_provider.py и README): фиксированная температура 0.0 отключает
+# встроенный выход из зацикливания, а порог тишины — единственное, что подавляет «Субтитры
+# сделал...» после долгих пауз. Исключения при этом не будет — просто тихо станет хуже текст.
+#
+# Для протокола опроса это плохой размен: 2x скорости там, где её и так с запасом (16x реального
+# времени), против ослабленной защиты в тексте, имеющем юридическое значение. Переменную
+# оставляем — на чистом материале и для офлайн-перегона размен может быть другим.
+ASR_BATCH_ENABLED = os.getenv("ASR_BATCH_ENABLED", "0") == "1"
+ASR_BATCH_MIN_S = float(os.getenv("ASR_BATCH_MIN_S", "20.0"))   # короче — обычный проход
+# 8 — с запасом: на 77с замер дал 2.08/2.02/2.01с для batch 4/8/16, то есть выигрыш даёт сам
+# факт батчинга, а не размер. Больше batch_size — только больше VRAM без ускорения.
+ASR_BATCH_SIZE = int(os.getenv("ASR_BATCH_SIZE", "8"))
+
 # Если среднее время partial-раунда (submit->result) превышает это значение — модель на этом
 # железе фундаментально не успевает за реальным временем (наблюдалось на CPU: decode ~10с на
 # 5с аудио на turbo). В этом состоянии partial-задания перестают ставиться совсем — они бы
 # только отнимали ёмкость воркеров у финалов и устаревали раньше, чем дошли бы до клиента.
-ASR_OVERLOAD_LAG_MS = float(os.getenv("ASR_OVERLOAD_LAG_MS", "4000"))
+# На GPU порог ниже — но НЕ настолько, насколько хочется. Замер: у дефолтной large-v3 раунд
+# partial при двух одновременно говорящих каналах занимает ~1.2с, то есть заманчивые «1.5с»
+# отключали бы партиалы ровно в момент активного диалога — там, где живой текст нужнее всего.
+# 2.5с оставляет запас над нормальным раундом тяжёлой модели и всё равно реагирует заметно
+# раньше CPU-порога. Если ставите модель полегче (turbo), порог можно опустить следом.
+_ASR_OVERLOAD_LAG_MS_ENV = os.getenv("ASR_OVERLOAD_LAG_MS")
+
+
+def asr_overload_lag_ms(device_name: str | None = None) -> float:
+    """Порог перегрузки для КОНКРЕТНОГО устройства, а не для того, что определилось при импорте.
+
+    `IS_GPU` замерзает на импорте, а устройство после этого меняется: преполёт
+    (`main.py::_preflight`) откатывает на CPU, если GPU не поднялся. Константа при этом
+    оставалась GPU-шной, и партиалы на CPU отключались на 1.5с раньше положенного — ровно в
+    деградированном режиме, где живой текст оператору нужнее всего. Тот же принцип, что в
+    `main.py::switch_model`: устройство берём от АКТИВНОГО ключа, а не из config.
+    Явно заданная переменная окружения главнее — её откат переигрывать не должен.
+    """
+    if _ASR_OVERLOAD_LAG_MS_ENV:
+        return float(_ASR_OVERLOAD_LAG_MS_ENV)
+    return 2500.0 if _is_gpu(device_name) else 4000.0
+
+
+ASR_OVERLOAD_LAG_MS = asr_overload_lag_ms()   # под устройство, определившееся при импорте

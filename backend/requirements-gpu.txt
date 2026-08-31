@@ -1,0 +1,29 @@
+# Дополнение к requirements.txt для запуска на NVIDIA GPU (CUDA 12).
+#
+#   pip install -r requirements.txt -r requirements-gpu.txt
+#
+# Зачем отдельный файл, а не флаг: GPU-запуск отличается не «галочкой», а составом нативных
+# библиотек. CTranslate2 (движок faster-whisper) собран с динамической линковкой на cuBLAS и
+# cuDNN и НЕ тянет их за собой — без них загрузка модели проходит, а первое же декодирование
+# падает с «Library cublas64_12.dll is not found». Ставим их явно.
+#
+# На Windows этого мало: pip кладёт DLL в site-packages/nvidia/*/bin, которого нет в путях
+# поиска. Каталоги регистрируются на старте в app/device.py::ensure_cuda_dlls() — ничего
+# прописывать в PATH руками не нужно.
+
+# Версия CTranslate2 закреплена намеренно. faster-whisper пускает сюда любой 4.x, но у
+# CTranslate2 major-версия cuDNN зашита в сборку (<=4.4 требует cuDNN 8, >=4.5 — cuDNN 9),
+# и «просто обновившийся» ctranslate2 ломает рабочую установку неочевидной ошибкой загрузки
+# DLL. Пара «4.8.1 + cuDNN 9» проверена на этой ветке.
+ctranslate2==4.8.1
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.24.0.43
+nvidia-cuda-nvrtc-cu12==12.9.86
+
+# torch НЕ здесь. requirements.txt тянет CPU-сборку, и она нужна только офлайн-финализации
+# (/api/finalize: alignment + диаризация) — live-ASR на неё не завязан вовсе. Если нужна и
+# финализация на GPU, поставьте CUDA-сборку ОТДЕЛЬНО, поверх:
+#
+#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+#
+# и включите её через FINALIZE_DEVICE=auto (дефолт — сам увидит cuda).

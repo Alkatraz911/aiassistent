@@ -23,7 +23,7 @@ import numpy as np
 
 from . import config, telemetry
 from .asr import get_asr
-from .asr.base import ASRWord
+from .asr.base import ASRWord, dropped_note, hallucination_reason
 from .asr.local_agreement import UtteranceHypothesis
 from .asr.model_manager import ModelKey, ModelManager
 from .asr.scheduler import AsrJob, AsrScheduler, PRIORITY_FINAL, PRIORITY_ONESHOT, PRIORITY_PARTIAL
@@ -98,8 +98,37 @@ class Session:
         default = {0: "Интервьюер", 1: "Опрашиваемый"}.get(channel, f"Голос-{channel + 1}")
         return default
 
+    def rename_speaker(self, old_label: str, new_label: str) -> int:
+        """Переименовать КОНКРЕТНЫЙ голос по его текущей метке; вернуть число сегментов.
+
+        Отдельно от `set_speaker` (который работает по каналу), потому что после офлайн-
+        диаризации общего микрофона в одном канале лежат РАЗНЫЕ спикеры («Голос-1», «Голос-2»).
+        Переименование по каналу в этом случае схлопывало весь протокол в одну метку — реальный
+        баг: пользователь менял «Голос-2» на «Опрашивающий» и получал «Опрашивающий» у всех
+        реплик разом, включая чужие.
+        """
+        with self._lock:
+            n = 0
+            for seg in self.protocol.segments:
+                if seg.speaker == old_label and seg.speaker != new_label:
+                    seg.edits.append(Edit(field="speaker", old=seg.speaker, new=new_label))
+                    seg.speaker = new_label
+                    n += 1
+            # Пер-канальная метка задаёт имя БУДУЩИХ реплик канала, поэтому двигаем её следом.
+            # Сегменты канала при этом не пересматриваем, и проверять нечего: запись в
+            # `speaker_names` появляется только через `set_speaker` («весь канал — этот
+            # голос»), а диаризация эту карту не трогает вовсе — значит канал, разложенный на
+            # «Голос-1»/«Голос-2», сюда просто не попадёт.
+            for ch, name in list(self.speaker_names.items()):
+                if name == old_label:
+                    self.speaker_names[ch] = new_label
+                    self.protocol.speaker_map[ch] = new_label
+            return n
+
     def set_speaker(self, channel: int, label: str) -> int:
-        """Переименовать спикера; вернуть число обновлённых сегментов."""
+        """Переименовать спикера ЦЕЛОГО канала; вернуть число обновлённых сегментов.
+        Основной режим (микрофон-на-участника), где канал и есть спикер. Для протокола после
+        диаризации нужен `rename_speaker` — там в канале несколько голосов."""
         with self._lock:
             self.speaker_names[channel] = label
             self.protocol.speaker_map[channel] = label
@@ -148,13 +177,27 @@ class Session:
 
     # --- контекст для ASR (initial_prompt) --------------------------------
     def _remember_prompt(self, channel: int, text: str) -> None:
+        """Копит недавно распознанное для контекста. При ASR_PROMPT_RECENT_WORDS=0 (дефолт)
+        не копит ничего — см. `_build_prompt`."""
+        keep = config.ASR_PROMPT_RECENT_WORDS
+        if keep <= 0:
+            return
         words = (self._recent_prompt.get(channel, "") + " " + text).split()
-        self._recent_prompt[channel] = " ".join(words[-60:])
+        self._recent_prompt[channel] = " ".join(words[-keep:])
 
     def _build_prompt(self, channel: int) -> str:
+        """Промпт для ASR. По умолчанию — ТОЛЬКО доменная подсказка, без недавних реплик.
+
+        Дописывание недавнего текста выглядит бесплатным улучшением («дадим модели контекст»), но
+        на реальной записи оно давало обратный эффект: на фоновом шуме модель возвращала этот
+        контекст дословно, и в протокол шли повторы предыдущих вопросов с новыми тайм-кодами
+        (замер и цифры — в config.py, ASR_PROMPT_RECENT_WORDS). Отличить такой повтор по тексту
+        от настоящего нельзя — в допросе опрашиваемый и правда повторяет вопрос, — поэтому
+        единственное честное место для лечения здесь: не подсовывать модели то, что она потом
+        выдаст за распознанное."""
         base = config.WHISPER_PROMPT or ""
         recent = self._recent_prompt.get(channel, "")
-        return (base + " " + recent).strip()
+        return (base + " " + recent).strip() if recent else base.strip()
 
     # --- real-time streaming ASR (Блок 2) ---------------------------------
     def ingest_streaming(self, channel: int, pcm_int16: np.ndarray) -> None:
@@ -185,7 +228,10 @@ class Session:
 
             if (st.hypothesis is not None
                     and not st.endpointer.is_closed(st.hypothesis.utterance_id)):
-                if st.lag_ema_ms > config.ASR_OVERLOAD_LAG_MS:
+                # Пороги — от устройства ЭТОЙ сессии (asr_model_key), а не от модуль-уровневых
+                # констант: те заморожены на импорте и остаются GPU-шными даже после отката
+                # преполёта на CPU (см. config.asr_overload_lag_ms).
+                if st.lag_ema_ms > config.asr_overload_lag_ms(self.asr_model_key[1]):
                     # Модель фундаментально не успевает за реальным временем на этом железе
                     # (naблюдалось: decode ~10с на 5с аудио на turbo/CPU — это не вопрос
                     # каданса, никакой откат внутри разумных пределов не поможет). В таком
@@ -198,7 +244,8 @@ class Session:
                     # Адаптивный каданс без искусственного потолка — если лаг реально ~10с,
                     # требуемый интервал должен быть порядка 10с+, а не капаться в 3.6с (это и
                     # была первая, недостаточная версия фикса: потолок глушил сам смысл отката).
-                    required_ms = max(config.ASR_UPDATE_MS, st.lag_ema_ms * 1.3)
+                    required_ms = max(config.asr_update_ms(self.asr_model_key[1]),
+                                      st.lag_ema_ms * 1.3)
                     if new_ms >= required_ms:
                         self._submit_partial(channel, st)
 
@@ -359,6 +406,22 @@ class Session:
         пауза между кликами) всплыла бы в уже новой записи, которую видит пользователь сейчас."""
         all_words = hyp.committed_words + tail_words
         text = UtteranceHypothesis.finalize_text(all_words)
+
+        # Последний рубеж перед протоколом. Провайдер фильтрует то, что выдала модель за один
+        # проход, а сюда текст приходит СОБРАННЫМ из слов, закоммиченных партиалами, плюс хвост
+        # финала, и потом ещё подрезанным по границе — то есть это уже другая строка. Реальный
+        # случай с живой записи: партиал выдал «Это опрос.» — не эхо промпта, слова «это» в
+        # промпте нет, фильтр провайдера пропустил, — LocalAgreement закоммитил слова, а после
+        # подрезки в сегменте осталось голое «опрос.», то есть чистое эхо. Проверяем ровно то,
+        # что пойдёт в протокол.
+        reason = hallucination_reason(text, config.WHISPER_PROMPT)
+        if reason:
+            # Отбраковка тут молчала совсем: Segment не создавался, и реплика пропадала из
+            # протокола бесследно. Собранный из партиалов текст в лог — единственная
+            # возможность потом понять, что именно выбросили и каким правилом.
+            print(dropped_note(f"сессия {self.id}/канал {channel}", reason, text))
+            text = ""
+
         is_current_epoch = (epoch == self.stream_epoch)
 
         msg = {"type": "asr_final", "channel": channel, "utterance_id": hyp.utterance_id, "text": text}
@@ -562,6 +625,13 @@ class SessionManager:
     @property
     def active_model(self) -> str:
         return self._active_key[0]
+
+    @property
+    def active_key(self) -> ModelKey:
+        """Полный ключ (модель, устройство, compute) — нужен диагностике `/api/health`, чтобы
+        показать РЕАЛЬНОЕ устройство, а не то, что просили: при провале GPU преполёт (main.py)
+        откатывает активный ключ на CPU."""
+        return self._active_key
 
     def set_active_model(self, key: ModelKey) -> None:
         """Меняет модель для НОВЫХ сессий (Блок 4) — уже созданные сессии хранят свой снапшот

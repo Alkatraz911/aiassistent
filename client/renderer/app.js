@@ -21,8 +21,23 @@ const state = {
 async function checkHealth() {
   try {
     const r = await fetch(`${HTTP}/api/health`).then((x) => x.json());
-    $("health").textContent = `${r.asr} · ${r.model}`;
-    $("health").className = "badge ok";
+    // Пока идёт преполёт, устройство в ответе — ещё только НАМЕРЕНИЕ: если GPU не поднимется,
+    // сервер откатится на CPU. Зелёный бейдж «large-v3 · GPU» в этот момент — прямая
+    // дезинформация, поэтому ждём итога и перезапрашиваем.
+    if (r.loading) {
+      $("health").textContent = "⏳ загрузка модели…";
+      $("health").className = "badge warn";
+      $("health").title = r.warning || "";
+      setTimeout(checkHealth, 1500);
+      return;
+    }
+    // Устройство показываем прямо в бейдже: одна и та же модель на CPU и на GPU — это разные
+    // режимы работы (large-v3 на CPU live не тянет вовсе), и видеть это надо ДО записи, а не
+    // потом по растущей задержке. r.warning непустой — GPU просили, но он не поднялся.
+    const dev = (r.device || "cpu").startsWith("cuda") ? "GPU" : "CPU";
+    $("health").textContent = `${r.asr} · ${r.model} · ${dev}`;
+    $("health").className = r.warning ? "badge warn" : "badge ok";
+    $("health").title = r.warning || "";
   } catch {
     $("health").textContent = "backend offline";
     $("health").className = "badge err";
@@ -80,21 +95,102 @@ function updateModelSelectEnabled() {
 async function loadMics() {
   // нужен доступ к устройствам — запросим разрешение
   try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach((t) => t.stop()); } catch {}
-  const devices = (await navigator.mediaDevices.enumerateDevices())
+  const all = (await navigator.mediaDevices.enumerateDevices())
     .filter((d) => d.kind === "audioinput");
+
+  // Windows отдаёт первыми ДВА псевдоустройства — «Default - …» и «Communications - …», и оба
+  // указывают на один и тот же физический микрофон. Прежний код брал devices[0] и devices[1],
+  // то есть сажал оба канала на одну железку: в протоколе выходили две одинаковые реплики с
+  // одинаковыми тайм-кодами, а канальная диаризация («канал = спикер») теряла смысл целиком.
+  // Псевдоустройства убираем из списка — выбирать нужно ФИЗИЧЕСКИЕ входы.
+  let devices = all.filter((d) => d.deviceId !== "default" && d.deviceId !== "communications");
+  // Подстраховка: если система отдаёт ТОЛЬКО псевдоустройства (встречается, пока не выдано
+  // разрешение на микрофон), лучше показать что есть, чем пустой список.
+  if (!devices.length) devices = all;
+
+  // Два одинаковых USB-микрофона отдают одинаковую подпись — без номера их не различить.
+  const seen = new Map();
+  const nameOf = (d, i) => {
+    const base = (d.label || `Микрофон ${i + 1}`).replace(/^(Default|Communications) - /, "");
+    const n = (seen.get(base) || 0) + 1;
+    seen.set(base, n);
+    return n > 1 ? `${base} #${n}` : base;
+  };
+  const names = devices.map(nameOf);
+
   for (const sel of [$("mic0"), $("mic1")]) {
     const cur = sel.value;
     sel.innerHTML = "";
+    // Канал 1 можно вообще не использовать — это режим одного общего микрофона: писать один
+    // вход в оба канала бессмысленно (протокол задваивается), а разводить голоса потом будет
+    // офлайн-диаризация. Без такого пункта единственное устройство неизбежно попадало в оба
+    // селектора, и запись выходила задвоенной.
+    if (sel.id === "mic1") {
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "— не используется —";
+      sel.appendChild(none);
+    }
     devices.forEach((d, i) => {
       const o = document.createElement("option");
       o.value = d.deviceId;
-      o.textContent = d.label || `Микрофон ${i + 1}`;
+      o.textContent = names[i];
       sel.appendChild(o);
     });
-    if (cur) sel.value = cur;
+    if (cur !== null && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
   }
-  // по умолчанию второй микрофон для опрашиваемого, если есть
-  if (devices[1]) $("mic1").value = devices[1].deviceId;
+  // Разные физические входы по умолчанию: первый — интервьюеру, второй — опрашиваемому.
+  // Только если выбирать ещё не приходилось: кнопка ⟳ не должна сбрасывать ручной выбор.
+  const has = (id) => devices.some((d) => d.deviceId === id);
+  if (!has($("mic0").value) && devices[0]) $("mic0").value = devices[0].deviceId;
+  // Второй канал ставим, только если есть ВТОРОЕ устройство. Единственный вход оставляем
+  // неназначенным: пусть это будет осознанный выбор режима, а не молча задвоенная запись.
+  // Ориентироваться на пустое значение тут нельзя: у mic1 пусто — это ещё и законный выбор
+  // «— не используется —», и по нему ⟳ возвращал второе устройство, снова задваивая протокол.
+  // Различает эти два случая только пометка dataset.chosen (см. onMicChosen).
+  if (!$("mic1").dataset.chosen && !$("mic1").value && devices[1]) {
+    $("mic1").value = devices[1].deviceId;
+  }
+  checkMicsDistinct();
+}
+
+// Пользователь тронул селектор микрофона — с этого момента выбор его, а не наш.
+function onMicChosen(e) {
+  e.currentTarget.dataset.chosen = "1";
+  checkMicsDistinct();
+}
+
+// Устройство для разовой записи ответа анкеты (говорит опрашиваемый). В обычном режиме это
+// его собственный микрофон; в стерео-режиме и в режиме одного общего микрофона второго
+// устройства нет вовсе — берём тот единственный, что выбран для канала 0.
+function answerDeviceId() {
+  if ($("stereoSplit").checked) return $("mic0").value;
+  return $("mic1").value || $("mic0").value;
+}
+
+// Канальная диаризация держится ровно на одном условии: каналы пришли с РАЗНЫХ микрофонов.
+// Если на обоих один вход, никакой алгоритм этого потом не разведёт — предупреждаем сразу,
+// а не после записи, когда протокол уже задвоился.
+function checkMicsDistinct() {
+  const stereo = $("stereoSplit").checked;
+  // В стерео-режиме одно устройство — это норма, а не ошибка: участники разведены по L/R,
+  // а не по разным входам. Второй селектор в этом режиме не участвует.
+  $("mic1").disabled = stereo;
+  const warn = $("micWarn");
+  if (!stereo && $("mic0").value && $("mic0").value === $("mic1").value) {
+    warn.textContent = "⚠ Оба канала на одном микрофоне — разбивки по голосам не будет";
+    warn.hidden = false;
+    return false;
+  }
+  if (!stereo && !$("mic1").value) {
+    // Не ошибка, а осознанный режим — но напоминаем, чем разводить голоса потом.
+    warn.textContent = "ℹ Один микрофон: после записи нажмите «Разметить голоса» — "
+                     + "реплики разведёт диаризация";
+    warn.hidden = false;
+    return true;
+  }
+  warn.hidden = true;
+  return true;
 }
 
 // ---------- AI-ассистент: анкета (Блок 6 — автозапись ответа по паузам) ----------
@@ -177,7 +273,7 @@ function startAutoListening() {
   stopAutoListening();
   hideAutoBoxes();
   $("autoListenBox").hidden = false;
-  autoRec = new window.AudioCapture.AutoRecorder($("mic1").value, {});
+  autoRec = new window.AudioCapture.AutoRecorder(answerDeviceId(), {});
   autoRec.onSilence((hadSpeech) => {
     $("autoListenBox").hidden = true;
     if (hadSpeech) finishAutoListening();
@@ -424,7 +520,7 @@ async function toggleRecordAnswer() {
   if (!answerRec) {
     hideAutoBoxes();
     stopAutoListening();   // ручная запись — приоритет над автослушанием, если оно ещё идёт
-    answerRec = new window.AudioCapture.OneShotRecorder($("mic1").value);
+    answerRec = new window.AudioCapture.OneShotRecorder(answerDeviceId());
     await answerRec.start();
     btn.textContent = "⏹ Остановить";
     btn.style.background = "#c5384a"; btn.style.color = "#fff";
@@ -459,15 +555,29 @@ function startRecording() {
   state.ws.onopen = async () => {
     // Сессия создаётся сервером автоматически при подключении к сокету — отдельный
     // "start"-сигнал не нужен (сервер его и не обрабатывает).
-    const mics = [
-      { ch: 0, dev: $("mic0").value },
-      { ch: 1, dev: $("mic1").value },
-    ];
-    for (const m of mics) {
-      if (!m.dev) continue;
-      const cap = new window.AudioCapture.CaptureChannel(m.ch, m.dev, state.ws);
-      await cap.start();
+    if ($("stereoSplit").checked) {
+      // Оба микрофона в одном адаптере: расщепляем его стерео на каналы 0 и 1.
+      const cap = new window.AudioCapture.StereoSplitCapture($("mic0").value, state.ws);
+      try {
+        await cap.start();
+      } catch (e) {
+        alert("Стерео-режим не вышел: " + e.message +
+              "\nСнимите галочку «стерео-вход» либо проверьте адаптер: py -3.11 -m app.test_mics");
+        state.ws.close();
+        return;
+      }
       state.captures.push(cap);
+    } else {
+      const mics = [
+        { ch: 0, dev: $("mic0").value },
+        { ch: 1, dev: $("mic1").value },
+      ];
+      for (const m of mics) {
+        if (!m.dev) continue;
+        const cap = new window.AudioCapture.CaptureChannel(m.ch, m.dev, state.ws);
+        await cap.start();
+        state.captures.push(cap);
+      }
     }
     state.recording = true;
     state.flushed = true;
@@ -486,6 +596,7 @@ function startRecording() {
     } else if (msg.type === "stopped") {
       state.flushed = true;
       $("finalizeBtn").disabled = false;
+      $("diarizeBtn").disabled = false;
       $("saveBtn").disabled = false;
     }
   };
@@ -499,6 +610,7 @@ function stopRecording() {
     // финализацию/сохранение, чтобы не потерять последние секунды разговора в протоколе.
     state.flushed = false;
     $("finalizeBtn").disabled = true;
+    $("diarizeBtn").disabled = true;
     $("saveBtn").disabled = true;
     state.ws.send(JSON.stringify({ type: "stop" }));
   }
@@ -572,7 +684,7 @@ function addSegment(seg) {
   sp.className = "seg-speaker " + speakerClass(seg.channel);
   sp.textContent = seg.speaker + ":";
   sp.title = "Клик — изменить метку голоса";
-  sp.onclick = () => openSpeakerModal(seg.channel);
+  sp.onclick = () => openSpeakerModal(seg.channel, seg.speaker);
 
   if (seg.likely_bleed) {
     wrap.classList.add("segment-bleed");
@@ -624,7 +736,10 @@ function addSegment(seg) {
   $("transcript").appendChild(wrap);
   $("transcript").scrollTop = $("transcript").scrollHeight;
 
-  state.segments.set(seg.id, { el: wrap, speakerEl: sp, channel: seg.channel, words, meta });
+  // speaker храним: переименование идёт ПО МЕТКЕ голоса (после диаризации в одном канале
+  // их несколько), и без неё нечего сравнивать при локальном обновлении ленты.
+  state.segments.set(seg.id, { el: wrap, speakerEl: sp, channel: seg.channel,
+                               speaker: seg.speaker, words, meta });
 }
 
 function applyBleedFlag(seg) {
@@ -666,18 +781,53 @@ function renderProtocol(protocol) {
   (protocol.segments || []).forEach(addSegment);
 }
 
+// Разметка голосов отдельной кнопкой, а не галочкой при «Уточнить тайм-коды». Это разные
+// операции с разной ценой и разным смыслом: тайм-коды уточняются всегда и никого не
+// переименовывают, а диаризация нужна только в режиме общего микрофона и переписывает метки
+// спикеров. Спрятанная в чекбокс, она была попросту незаметна.
+async function diarizeVoices() {
+  const btn = $("diarizeBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "⏳ Разметка…";
+  const num = parseInt($("numSpeakers").value, 10) || 0;
+  try {
+    const r = await fetch(`${HTTP}/api/finalize`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // align здесь НЕ трогаем: уточнение тайм-кодов — отдельная кнопка, и падение тяжёлой
+      // wav2vec2-модели не должно уносить с собой уже посчитанную разметку голосов.
+      body: JSON.stringify({
+        session_id: SESSION, align: false, diarize: true,
+        num_speakers: num > 0 ? num : null,
+      }),
+    }).then((x) => x.json());
+    if (r.error) {
+      alert("Не удалось разметить голоса: " + r.error);
+      return;
+    }
+    renderProtocol(r.protocol);
+    alert(`Готово — голосов найдено: ${r.speakers ?? "?"}.
+` +
+          "Метки «Голос-N» переименовываются кликом по имени слева от реплики.");
+  } catch (e) {
+    alert("Ошибка: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
 async function finalizeTimecodes() {
   const btn = $("finalizeBtn");
   btn.disabled = true;
   const prev = btn.textContent;
   btn.textContent = "⏳ Обработка…";
-  const diarize = $("diarizeChk").checked;
   const num = parseInt($("numSpeakers").value, 10) || 0;
   try {
     const r = await fetch(`${HTTP}/api/finalize`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        session_id: SESSION, align: true, diarize,
+        session_id: SESSION, align: true, diarize: false,
         num_speakers: num > 0 ? num : null,
       }),
     }).then((x) => x.json());
@@ -686,9 +836,7 @@ async function finalizeTimecodes() {
     } else {
       renderProtocol(r.protocol);
       await loadAudio();
-      const parts = [`тайм-коды: ${r.aligned_segments ?? 0} сегм.`];
-      if (diarize) parts.push(`голосов найдено: ${r.speakers ?? "?"}`);
-      alert("Готово — " + parts.join(", "));
+      alert(`Готово — тайм-коды уточнены: ${r.aligned_segments ?? 0} сегм.`);
     }
   } catch (e) {
     alert("Ошибка: " + e);
@@ -700,22 +848,48 @@ async function finalizeTimecodes() {
 
 // ---------- Маркировка спикеров ----------
 let modalChannel = null;
-function openSpeakerModal(channel) {
+let modalSpeaker = null;   // текущая метка голоса, по которой и переименовываем
+function openSpeakerModal(channel, speaker) {
   modalChannel = channel;
-  $("modalChannel").textContent = channel;
+  modalSpeaker = speaker || null;
+  $("modalChannel").textContent = speaker ? `«${speaker}»` : `канал ${channel}`;
   $("speakerInput").value = "";
   $("speakerModal").hidden = false;
 }
 async function applySpeaker(label) {
   if (!label) label = $("speakerInput").value.trim();
   if (!label || modalChannel === null) return;
-  await fetch(`${HTTP}/api/speaker`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label }),
-  });
-  // обновляем все сегменты этого канала локально
+  // Лента перерисовывается локально, поэтому ответ обязателен к проверке: на истёкшей сессии
+  // /api/speaker отдаёт 404 «no session», сервер ничего не переименовал — и молчаливая
+  // перерисовка показала бы новую метку, которой в протоколе нет.
+  let r;
+  try {
+    r = await fetch(`${HTTP}/api/speaker`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // speaker — какой именно голос переименовываем. После диаризации общего микрофона в
+      // одном канале лежат разные спикеры, и переименование «по каналу» схлопнуло бы весь
+      // протокол в одну метку (реальный баг: «Голос-2» -> «Опрашивающий» у всех реплик).
+      body: JSON.stringify({ session_id: SESSION, channel: modalChannel, label,
+                             speaker: modalSpeaker }),
+    }).then((x) => x.json());
+  } catch (e) {
+    alert("Ошибка: " + e);
+    return;
+  }
+  if (r.error) {
+    alert("Не удалось переименовать голос: " + r.error);
+    return;
+  }
+  // Локально обновляем ленту, не перезагружая протокол.
   state.segments.forEach((s) => {
-    if (s.channel === modalChannel) s.speakerEl.textContent = label + ":";
+    // Обновляем ровно те строки, что реально переименованы на сервере.
+    const wasLabel = modalSpeaker;
+    if (wasLabel) {
+      if (s.speaker === wasLabel) { s.speaker = label; s.speakerEl.textContent = label + ":"; }
+    } else if (s.channel === modalChannel) {
+      s.speaker = label;
+      s.speakerEl.textContent = label + ":";
+    }
   });
   $("speakerModal").hidden = true;
 }
@@ -755,6 +929,7 @@ function bind() {
   $("startRec").onclick = startRecording;
   $("stopRec").onclick = stopRecording;
   $("finalizeBtn").onclick = finalizeTimecodes;
+  $("diarizeBtn").onclick = diarizeVoices;
   $("saveBtn").onclick = () =>
     fetch(`${HTTP}/api/save`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -762,6 +937,9 @@ function bind() {
     }).then(() => alert("Протокол сохранён на сервере."));
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
+  $("mic0").onchange = onMicChosen;
+  $("mic1").onchange = onMicChosen;
+  $("stereoSplit").onchange = checkMicsDistinct;
   $("modelSelect").onchange = onModelChange;
   $("audio").addEventListener("timeupdate", onTimeUpdate);
 

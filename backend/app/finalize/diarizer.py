@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from .. import config
+from .. import config, device
 
 
 class Diarizer:
     def __init__(self) -> None:
         self.model = None
+        self.device = "cpu"
 
     def _load(self) -> None:
         if self.model is not None:
@@ -43,10 +44,11 @@ class Diarizer:
 
         sb_fetch.link_with_strategy = _copy_only
 
+        self.device = device.resolve_torch_device(config.FINALIZE_DEVICE)
         self.model = EncoderClassifier.from_hparams(
             source="speechbrain/spkrec-ecapa-voxceleb",
             savedir=str(config.BASE_DIR / "models" / "ecapa"),
-            run_opts={"device": "cpu"},
+            run_opts={"device": self.device},
         )
         import torch
         self._torch = torch
@@ -64,7 +66,7 @@ class Diarizer:
         self._load()
         torch = self._torch
         with torch.inference_mode():
-            wav = torch.tensor(audio, dtype=torch.float32).unsqueeze(0)
+            wav = torch.tensor(audio, dtype=torch.float32).unsqueeze(0).to(self.device)
             emb = self.model.encode_batch(wav).squeeze().cpu().numpy()
         return emb.astype(np.float32)
 
