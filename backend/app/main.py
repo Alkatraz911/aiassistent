@@ -17,20 +17,23 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import struct
 import threading
+import uuid
 
 import numpy as np
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import config, device, telemetry
-from .assistant import templates as templates_store
+from .assistant import docgen, templates as templates_store
+from .assistant.docx_import import normalize_docx
 from .assistant.questionnaire import build_script
-from .models import TemplateStep
+from .models import Template, TemplateStep
 from .session import manager
 
 app = FastAPI(title="Протокол-ассистент MVP")
@@ -194,6 +197,13 @@ class TemplateSaveReq(BaseModel):
     name: str
     description: str = ""
     steps: list[TemplateStep]
+    # Черновик из /api/templates/import_docx несёт свой id и путь к уже сохранённому докс-файлу —
+    # без явной передачи id при сохранении получил бы НОВЫЙ id, и docx/<старый_id>.docx осиротел
+    # бы (см. комментарий в TemplateStore.create). id значим только для POST (создание);
+    # PUT игнорирует его — id шаблона в апдейте берётся из URL.
+    id: str | None = None
+    docx_filename: str | None = None
+    qa_placeholder: str | None = None
 
 
 @app.get("/api/templates")
@@ -212,7 +222,10 @@ def get_template(template_id: str) -> dict:
 @app.post("/api/templates")
 def create_template(req: TemplateSaveReq) -> dict:
     try:
-        tmpl = templates_store.store.create(req.name, req.description, req.steps)
+        tmpl = templates_store.store.create(
+            req.name, req.description, req.steps,
+            id=req.id, docx_filename=req.docx_filename, qa_placeholder=req.qa_placeholder,
+        )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=422)
     return tmpl.model_dump()
@@ -221,7 +234,10 @@ def create_template(req: TemplateSaveReq) -> dict:
 @app.put("/api/templates/{template_id}")
 def update_template(template_id: str, req: TemplateSaveReq) -> dict:
     try:
-        tmpl = templates_store.store.update(template_id, req.name, req.description, req.steps)
+        tmpl = templates_store.store.update(
+            template_id, req.name, req.description, req.steps,
+            docx_filename=req.docx_filename, qa_placeholder=req.qa_placeholder,
+        )
     except PermissionError as e:
         return JSONResponse({"error": str(e)}, status_code=403)
     except ValueError as e:
@@ -242,6 +258,58 @@ def delete_template(template_id: str) -> dict:
     if not ok:
         return JSONResponse({"error": "шаблон не найден"}, status_code=404)
     return {"ok": True}
+
+
+@app.post("/api/templates/import_docx")
+async def import_docx_template(file: UploadFile = File(...)) -> dict:
+    """Импорт реального .docx-бланка протокола: находит `#{NS.FIELD}`-токены, нормализует их в
+    Jinja-плейсхолдеры и возвращает ЧЕРНОВИК шаблона (по одному шагу на найденный токен) —
+    оператор донастраивает формулировки/порядок в редакторе и сохраняет через POST /api/templates
+    (передавая тот же id и docx_filename из этого ответа, см. TemplateSaveReq). Ничего не пишет
+    в TemplateStore здесь — черновик до подтверждения оператором не считается сохранённым
+    шаблоном."""
+    raw = await file.read()
+    new_id = uuid.uuid4().hex[:12]
+    docx_filename = f"{new_id}.docx"
+    dst = config.TEMPLATES_DIR / "docx" / docx_filename
+    try:
+        placeholders = normalize_docx(io.BytesIO(raw), dst)
+    except Exception as e:
+        return JSONResponse({"error": f"не удалось разобрать .docx: {e}"}, status_code=422)
+
+    steps = [
+        TemplateStep(key=token, label=token, kind="field", source="manual", placeholder=token)
+        for token in placeholders
+    ]
+    tmpl = Template(id=new_id, name="", docx_filename=docx_filename, steps=steps)
+    return tmpl.model_dump()
+
+
+@app.post("/api/protocol/{session_id}/docx")
+def generate_protocol_docx(session_id: str):
+    """Заполняет докс-шаблон, привязанный к пройденному шаблону анкеты сессии, и отдаёт готовый
+    .docx на скачивание. Требует, чтобы сессия проходила анкету с шаблоном, у которого задан
+    docx_filename (см. docgen.render)."""
+    s = manager.get(session_id)
+    if not s:
+        return JSONResponse({"error": "no session"}, status_code=404)
+    snapshot = s.protocol.template_snapshot
+    if snapshot is None or not snapshot.docx_filename:
+        return JSONResponse(
+            {"error": "у шаблона этой сессии нет привязанного .docx-бланка"}, status_code=422)
+    try:
+        out_path = docgen.render(
+            s.protocol,
+            docx_template_path=config.TEMPLATES_DIR / "docx" / snapshot.docx_filename,
+            out_path=s.dir / "protocol.docx",
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=422)
+    return FileResponse(
+        str(out_path),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=f"protocol_{session_id}.docx",
+    )
 
 
 @app.post("/api/transcribe")

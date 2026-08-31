@@ -83,6 +83,13 @@ class TemplateStep(BaseModel):
     statement: str = ""     # текст для зачитывания (разъяснение, опционально)
     question: str = ""      # вопрос, требующий ответа (для field/confirm)
     extractor: str = "plain"    # ключ из EXTRACTORS (questionnaire.py): fio/birth/yesno/plain/none
+    # Генерация .docx-протокола (Блок 6): токен mail-merge докс-шаблона (без "#{}"), в который
+    # уйдёт ответ на этот шаг, например "T1.PARTICIP_SURNAME". Пусто — шаг не привязан к докс-полю.
+    placeholder: str = ""
+    # UI-подсказка клиенту: "asr" — спрашивать голосом как сегодня, "manual" — просто текстовое
+    # поле (для полей шапки протокола, которые опрашиваемый вслух не произносит — имя следователя,
+    # место проведения и т.п.). Бэкенд оба варианта хранит и обрабатывает одинаково.
+    source: Literal["asr", "manual"] = "asr"
 
 
 class Template(BaseModel):
@@ -98,6 +105,12 @@ class Template(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     steps: list[TemplateStep] = Field(default_factory=list)
+    # Генерация .docx-протокола (Блок 6): имя (не путь) нормализованного докс-файла под
+    # `storage/templates/docx/`, например "<template_id>.docx". None — к шаблону не привязан
+    # докс (обычный анкетный шаблон без генерации документа).
+    docx_filename: Optional[str] = None
+    # Токен докс-шаблона, в который уходит полная стенограмма «Вопрос/Ответ» допроса.
+    qa_placeholder: Optional[str] = None
 
 
 class TemplateSummary(BaseModel):

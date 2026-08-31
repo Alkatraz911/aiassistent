@@ -15,6 +15,11 @@ const state = {
   flushed: true,            // false между отправкой "stop" и получением "stopped"
   templateId: null,         // выбранный шаблон анкеты (Блок 5)
   editingTemplateId: null,  // null = создаём новый, иначе редактируем существующий
+  // Импорт .docx-бланка (Блок 6): id/имя докс-файла черновика, которые нужно передать при
+  // сохранении шаблона (POST /api/templates), иначе сохранённый шаблон получит другой id, и
+  // уже нормализованный докс-файл на сервере останется ни на что не сославшимся.
+  importedDocxId: null,
+  importedDocxFilename: null,
 };
 
 // ---------- health + микрофоны ----------
@@ -402,12 +407,23 @@ function stepRowTemplate(step) {
           <option value="none">не сохранять</option>
         </select>
       </label>
+      <label>Источник
+        <select class="step-source">
+          <option value="asr">голосом (ASR)</option>
+          <option value="manual">текстом вручную</option>
+        </select>
+      </label>
+      <label>Плейсхолдер .docx
+        <input class="step-placeholder" type="text" placeholder="напр. T1.PARTICIP_SURNAME"
+               value="${escAttr(step.placeholder || "")}" />
+      </label>
     </div>
     <textarea class="step-statement" placeholder="Текст для зачитывания (разъяснение, опционально)">${step.statement || ""}</textarea>
     <textarea class="step-question" placeholder="Вопрос (если нужен ответ)">${step.question || ""}</textarea>
   `;
   row.querySelector(".step-kind").value = step.kind || "field";
   row.querySelector(".step-extractor").value = step.extractor || "plain";
+  row.querySelector(".step-source").value = step.source || "asr";
   row.dataset.key = step.key || ("step" + Math.random().toString(36).slice(2, 8));
   row.querySelector(".step-remove").onclick = () => row.remove();
   row.querySelector(".step-up").onclick = () => {
@@ -427,6 +443,8 @@ function escAttr(s) {
 
 async function openTemplateEditor(templateId) {
   state.editingTemplateId = templateId;
+  state.importedDocxId = null;
+  state.importedDocxFilename = null;
   const stepsBox = $("templateSteps");
   stepsBox.innerHTML = "";
   $("templateHint").textContent = "";
@@ -445,9 +463,46 @@ async function openTemplateEditor(templateId) {
   }
   $("templateName").value = tmpl.name || "";
   $("templateDescription").value = tmpl.description || "";
+  $("templateQaPlaceholder").value = tmpl.qa_placeholder || "";
+  // Существующий шаблон уже привязан к своему докс-файлу на сервере — сохраняем ссылку на него,
+  // чтобы PUT-редактирование не потеряло привязку (docx_filename не восстанавливается сам по себе).
+  state.importedDocxFilename = tmpl.docx_filename || null;
   (tmpl.steps || []).forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
   $("templateDeleteBtn").hidden = !state.editingTemplateId;
   $("templateModal").hidden = false;
+}
+
+async function importDocxTemplate(file) {
+  if (!file) return;
+  $("templateHint").textContent = "Импортирую .docx…";
+  const form = new FormData();
+  form.append("file", file);
+  let draft;
+  try {
+    const r = await fetch(`${HTTP}/api/templates/import_docx`, { method: "POST", body: form });
+    draft = await r.json();
+    if (!r.ok) { $("templateHint").textContent = draft.error || "Не удалось импортировать .docx."; return; }
+  } catch (e) {
+    $("templateHint").textContent = "Ошибка импорта: " + e;
+    return;
+  }
+  // Черновик не сохранён в хранилище шаблонов (см. main.py::import_docx_template) — оператор
+  // донастраивает поля и сохраняет через обычный saveTemplate(), который должен создать НОВЫЙ
+  // шаблон с id/docx_filename из черновика, а не отредактировать текущий (если он был открыт).
+  state.editingTemplateId = null;
+  state.importedDocxId = draft.id;
+  state.importedDocxFilename = draft.docx_filename;
+  $("templateName").value = "";
+  $("templateDescription").value = "";
+  $("templateQaPlaceholder").value = "";
+  $("templateModalTitle").textContent = "Новый шаблон из .docx";
+  $("templateDeleteBtn").hidden = true;
+  const stepsBox = $("templateSteps");
+  stepsBox.innerHTML = "";
+  (draft.steps || []).forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
+  $("templateHint").textContent =
+    `Найдено полей: ${(draft.steps || []).length}. Заполните название, при необходимости — ` +
+    `вопросы/формулировки для каждого поля, и вопрос стенограммы (QA-плейсхолдер), затем сохраните.`;
 }
 
 function slugify(label, fallback) {
@@ -468,6 +523,8 @@ function collectStepsFromEditor() {
       key, label,
       kind: row.querySelector(".step-kind").value,
       extractor: row.querySelector(".step-extractor").value,
+      source: row.querySelector(".step-source").value,
+      placeholder: row.querySelector(".step-placeholder").value.trim(),
       statement: row.querySelector(".step-statement").value.trim(),
       question: row.querySelector(".step-question").value.trim(),
     };
@@ -479,7 +536,16 @@ async function saveTemplate() {
   if (!name) { $("templateHint").textContent = "Укажите название шаблона."; return; }
   const steps = collectStepsFromEditor();
   if (!steps.length) { $("templateHint").textContent = "Добавьте хотя бы один шаг."; return; }
-  const body = JSON.stringify({ name, description: $("templateDescription").value.trim(), steps });
+  const payload = {
+    name, description: $("templateDescription").value.trim(), steps,
+    docx_filename: state.importedDocxFilename || null,
+    qa_placeholder: $("templateQaPlaceholder").value.trim() || null,
+  };
+  // id значим только при создании нового шаблона из импортированного .docx-черновика (см.
+  // importDocxTemplate) — без него сохранённый шаблон получил бы другой id, и уже
+  // нормализованный докс-файл на сервере остался бы ни на что не сославшимся (main.py комментарий).
+  if (!state.editingTemplateId && state.importedDocxId) payload.id = state.importedDocxId;
+  const body = JSON.stringify(payload);
   const url = state.editingTemplateId
     ? `${HTTP}/api/templates/${state.editingTemplateId}` : `${HTTP}/api/templates`;
   const method = state.editingTemplateId ? "PUT" : "POST";
@@ -921,6 +987,37 @@ function onTimeUpdate() {
   });
 }
 
+// ---------- генерация .docx-протокола (Блок 6) ----------
+async function generateProtocolDocx() {
+  const btn = $("genDocxBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "⏳ Формирую…";
+  try {
+    const r = await fetch(`${HTTP}/api/protocol/${SESSION}/docx`, { method: "POST" });
+    if (!r.ok) {
+      let msg = "Не удалось сформировать протокол.";
+      try { msg = (await r.json()).error || msg; } catch {}
+      alert(msg);
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `protocol_${SESSION}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("Ошибка: " + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
 // ---------- bind ----------
 function bind() {
   $("startAssistant").onclick = startAssistant;
@@ -935,6 +1032,7 @@ function bind() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: SESSION }),
     }).then(() => alert("Протокол сохранён на сервере."));
+  $("genDocxBtn").onclick = generateProtocolDocx;
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
   $("mic0").onchange = onMicChosen;
@@ -960,6 +1058,13 @@ function bind() {
   $("templateCancel").onclick = () => ($("templateModal").hidden = true);
   $("templateSaveBtn").onclick = saveTemplate;
   $("templateDeleteBtn").onclick = deleteTemplateConfirm;
+
+  $("importDocxBtn").onclick = () => $("importDocxInput").click();
+  $("importDocxInput").onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";   // сброс, иначе повторный выбор того же файла не вызовет onchange
+    if (file) await importDocxTemplate(file);
+  };
 }
 
 bind();

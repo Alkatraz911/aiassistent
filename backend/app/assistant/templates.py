@@ -78,16 +78,30 @@ class TemplateStore:
         except Exception:
             return None
 
-    def create(self, name: str, description: str, steps: list[TemplateStep]) -> Template:
+    def create(self, name: str, description: str, steps: list[TemplateStep],
+               id: str | None = None, docx_filename: str | None = None,
+               qa_placeholder: str | None = None) -> Template:
+        """`id` — явно заданный id (например, черновик из `/api/templates/import_docx`, для
+        которого докс-файл уже сохранён под этим id на диске: без переиспользования id тут
+        сохранённый шаблон получил бы ДРУГОЙ id, и файл `docx/<новый_id>.docx` осиротел бы,
+        не будучи ни на что не сославшимся). `None` — обычное поведение, id генерируется сам."""
         _validate_unique_keys(steps)
-        tmpl = Template(name=name, description=description, steps=steps)
+        kwargs = dict(name=name, description=description, steps=steps,
+                      docx_filename=docx_filename, qa_placeholder=qa_placeholder)
+        if id:
+            kwargs["id"] = id
+        tmpl = Template(**kwargs)
         with self._lock:
             self._write_locked(tmpl)
         return tmpl
 
     def update(self, template_id: str, name: str, description: str,
-               steps: list[TemplateStep]) -> Template | None:
-        """`None` — шаблон не найден. Поднимает `PermissionError` для builtin."""
+               steps: list[TemplateStep], docx_filename: str | None = None,
+               qa_placeholder: str | None = None) -> Template | None:
+        """`None` — шаблон не найден. Поднимает `PermissionError` для builtin.
+        `docx_filename`/`qa_placeholder` явно принимаются (а не наследуются молча), чтобы
+        редактирование импортированного из .docx шаблона могло и сохранить, и поменять
+        привязку к докс-файлу."""
         existing = self.get(template_id)
         if existing is None:
             return None
@@ -96,6 +110,7 @@ class TemplateStore:
         _validate_unique_keys(steps)
         updated = existing.model_copy(update={
             "name": name, "description": description, "steps": steps,
+            "docx_filename": docx_filename, "qa_placeholder": qa_placeholder,
             "version": existing.version + 1, "updated_at": time.time(),
         })
         with self._lock:

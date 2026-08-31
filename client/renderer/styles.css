@@ -140,7 +140,7 @@ td.v.filled { color: #1f7a45; }
 }
 .step-row .step-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
 .step-row .step-head input.step-label { flex: 1; margin-bottom: 0; }
-.step-row select.step-kind, .step-row select.step-extractor { padding: 4px; }
+.step-row select.step-kind, .step-row select.step-extractor, .step-row select.step-source { padding: 4px; }
 .step-row textarea {
   width: 100%; min-height: 44px; border: 1px solid #cfd6e4; border-radius: 6px;
   padding: 6px; font-size: 13px; resize: vertical; margin-bottom: 6px;
@@ -148,5 +148,9 @@ td.v.filled { color: #1f7a45; }
 .step-row .step-order { display: flex; flex-direction: column; gap: 2px; }
 .step-row .step-order button { padding: 2px 6px; font-size: 11px; background: #e3e8f2; color: #2b3550; }
 .step-row .step-remove { background: transparent; color: #a5374a; padding: 4px 8px; }
-.step-row .step-meta { display: flex; gap: 8px; font-size: 12px; color: #66718c; margin-bottom: 6px; }
+.step-row .step-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 12px; color: #66718c; margin-bottom: 6px; }
 .step-row .step-meta label { display: flex; align-items: center; gap: 4px; }
+.step-row .step-meta input.step-placeholder {
+  width: 190px; padding: 4px 6px; border: 1px solid #cfd6e4; border-radius: 5px;
+  font-size: 12px; margin-bottom: 0;
+}

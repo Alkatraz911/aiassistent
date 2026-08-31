@@ -77,6 +77,7 @@
           <button id="diarizeBtn" class="ghost" title="Запись велась одним общим микрофоном: развести реплики по голосам (ECAPA + кластеризация). Не нужно, если у каждого участника свой микрофон — там голоса разделены самой записью.">👥 Разметить голоса</button>
           <button id="finalizeBtn" class="ghost">✨ Уточнить тайм-коды</button>
           <button id="saveBtn" class="ghost">💾 Сохранить</button>
+          <button id="genDocxBtn" class="ghost" title="Заполнить .docx-бланк протокола данными этой сессии (нужен шаблон анкеты с привязанным докс-файлом)">📄 Сформировать протокол (.docx)</button>
         </div>
       </div>
 
@@ -122,8 +123,12 @@
       <h3 id="templateModalTitle">Шаблон анкеты</h3>
       <div class="row">
         <input id="templateName" type="text" placeholder="Название шаблона" style="flex:1" />
+        <button id="importDocxBtn" class="ghost" title="Загрузить реальный .docx-бланк протокола: найдёт токены #{NS.FIELD} и создаст черновик шаблона с полем на каждый токен">⇪ Импортировать .docx</button>
+        <input id="importDocxInput" type="file" accept=".docx" hidden />
       </div>
       <input id="templateDescription" type="text" placeholder="Описание (необязательно)" />
+      <input id="templateQaPlaceholder" type="text"
+             placeholder="Плейсхолдер .docx для стенограммы «Вопрос/Ответ» (необязательно, напр. T1.DOC_PLOT)" />
       <div id="templateSteps" class="template-steps"></div>
       <div class="row">
         <button id="addStepBtn" class="ghost">+ Добавить шаг</button>
