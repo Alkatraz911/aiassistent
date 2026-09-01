@@ -58,8 +58,8 @@ button.rec { background: #c5384a; }
 button.stop { background: #6b7488; }
 .row { display: flex; gap: 8px; margin-top: 8px; }
 
-.template-row { display: flex; gap: 8px; margin-bottom: 10px; }
-.template-row select { flex: 1; padding: 5px; }
+.template-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.template-row select { flex: 1; min-width: 120px; padding: 5px; }
 
 .assistant { background: #fff; border: 1px solid #dde3ee; border-radius: 10px; padding: 14px; }
 .assistant-prompt {

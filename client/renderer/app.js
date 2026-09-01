@@ -382,11 +382,20 @@ async function loadTemplates() {
       const o = document.createElement("option");
       o.value = t.id;
       o.textContent = `${t.name}${t.is_builtin ? " (стандартный)" : ""} — ${t.step_count} шаг.`;
+      o.dataset.builtin = t.is_builtin ? "1" : "";
       sel.appendChild(o);
     });
     sel.value = list.some((t) => t.id === prev) ? prev : (list[0] ? list[0].id : "");
     state.templateId = sel.value || null;
+    updateDeleteTemplateBtnState();
   } catch {}
+}
+
+// Стандартный шаблон не удаляется (см. TemplateStore.delete в backend) — вместо того чтобы
+// давать нажать и упереться в алерт с ошибкой, сразу выключаем кнопку.
+function updateDeleteTemplateBtnState() {
+  const opt = $("templateSelect").selectedOptions[0];
+  $("deleteSelectedTemplateBtn").disabled = !opt || opt.dataset.builtin === "1";
 }
 
 let draggedStepRow = null;   // текущий перетаскиваемый .step-row (один редактор шаблона зараз)
@@ -783,6 +792,19 @@ async function deleteTemplateConfirm() {
   const data = await r.json();
   if (!r.ok) { $("templateHint").textContent = data.error || "Не удалось удалить шаблон."; return; }
   $("templateModal").hidden = true;
+  await loadTemplates();
+}
+
+// Удаление прямо из выбора шаблона (Блок 6) — без открытия полного редактора: раньше
+// единственный способ удалить шаблон был через «✎ Редактировать» -> прокрутить длинный список
+// шагов до кнопки внизу модалки, что для простого «убрать ненужный шаблон» избыточно.
+async function deleteSelectedTemplate() {
+  if (!state.templateId) return;
+  const label = $("templateSelect").selectedOptions[0]?.textContent || "выбранный шаблон";
+  if (!confirm(`Удалить шаблон «${label}»? Это необратимо.`)) return;
+  const r = await fetch(`${HTTP}/api/templates/${state.templateId}`, { method: "DELETE" });
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || "Не удалось удалить шаблон."); return; }
   await loadTemplates();
 }
 
@@ -1340,11 +1362,15 @@ function bind() {
   $("profileCancel").onclick = () => ($("profileModal").hidden = true);
   $("profileSaveBtn").onclick = saveProfile;
 
-  $("templateSelect").onchange = () => { state.templateId = $("templateSelect").value || null; };
+  $("templateSelect").onchange = () => {
+    state.templateId = $("templateSelect").value || null;
+    updateDeleteTemplateBtnState();
+  };
   $("newTemplateBtn").onclick = () => openTemplateEditor(null);
   $("editTemplateBtn").onclick = () => {
     if (state.templateId) openTemplateEditor(state.templateId);
   };
+  $("deleteSelectedTemplateBtn").onclick = deleteSelectedTemplate;
   $("addStepBtn").onclick = () => {
     $("templateSteps").appendChild(stepRowTemplate({ kind: "field" }));
   };
