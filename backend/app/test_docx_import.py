@@ -21,7 +21,8 @@ except Exception:
 
 from docx import Document
 
-from .assistant.docx_import import normalize_docx, scan_placeholders
+from .assistant.docx_import import normalize_docx, scan_placeholders, uncovered_placeholders
+from .models import Template, TemplateStep
 
 
 def _build_fixture_docx() -> io.BytesIO:
@@ -70,9 +71,32 @@ def test_normalize_docx_rewrites_tokens_and_keeps_surrounding_text() -> None:
     assert "конец." in full_text
 
 
+def test_uncovered_placeholders_flags_step_without_matching_token() -> None:
+    """Реальный случай из багрепорта: оператор при редактировании шаблона удалил шаг или
+    переименовал плейсхолдер с опечаткой — токен остаётся в .docx, но ни один шаг на него не
+    ссылается. `T1.BAR` покрыт шагом, `T1.FOO` — нет (ни как placeholder шага, ни как
+    qa_placeholder)."""
+    buf = _build_fixture_docx()
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "normalized.docx"
+        normalize_docx(buf, out_path)
+        tmpl = Template(
+            id="t", name="t", docx_filename="normalized.docx",
+            steps=[TemplateStep(key="bar", label="Bar", placeholder="T1.BAR")],
+        )
+        missing = uncovered_placeholders(tmpl, out_path)
+        print(f"непокрытые плейсхолдеры: {missing}")
+        assert missing == ["T1_FOO"]
+
+        # А если T1.FOO отдан под стенограмму — покрытие полное.
+        tmpl_with_qa = tmpl.model_copy(update={"qa_placeholder": "T1.FOO"})
+        assert uncovered_placeholders(tmpl_with_qa, out_path) == []
+
+
 def main() -> None:
     test_scan_placeholders_finds_split_and_inline_tokens()
     test_normalize_docx_rewrites_tokens_and_keeps_surrounding_text()
+    test_uncovered_placeholders_flags_step_without_matching_token()
     print("\nTEST_DOCX_IMPORT OK ✅")
 
 

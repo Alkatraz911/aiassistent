@@ -19,6 +19,8 @@
         <select id="mic1"></select>
       </label>
       <button id="refreshMics" class="ghost">⟳</button>
+      <button id="operatorProfileBtn" class="ghost"
+              title="Значения, которые не меняются от допроса к допросу (напр. автор документа) — заполняются один раз здесь">⚙ Профиль оператора</button>
       <!-- Разбивка по голосам держится на том, что каналы пришли с разных микрофонов. -->
       <label class="stereo-split" title="Оба микрофона в одном USB-адаптере: левый канал — интервьюер, правый — опрашиваемый. Проверить, что адаптер их разводит: py -3.11 -m app.test_mics">
         <input type="checkbox" id="stereoSplit" /> стерео-вход: L и R — разные участники
@@ -122,18 +124,36 @@
     </div>
   </div>
 
+  <!-- модалка профиля оператора (Блок 6): поля с source="profile" из всех шаблонов сразу -->
+  <div id="profileModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>Профиль оператора</h3>
+      <p class="hint">Эти значения не меняются от допроса к допросу — заполните один раз,
+        дальше они сами подставятся в любой документ, где встречается такое поле.</p>
+      <div id="profileFields"></div>
+      <div class="row">
+        <button id="profileCancel" class="ghost">Отмена</button>
+        <button id="profileSaveBtn">Сохранить</button>
+      </div>
+      <p class="hint" id="profileHint"></p>
+    </div>
+  </div>
+
   <!-- модалка редактора шаблона анкеты -->
   <div id="templateModal" class="modal" hidden>
     <div class="modal-card modal-card-wide">
       <h3 id="templateModalTitle">Шаблон анкеты</h3>
       <div class="row">
         <input id="templateName" type="text" placeholder="Название шаблона" style="flex:1" />
-        <button id="importDocxBtn" class="ghost" title="Загрузить реальный .docx-бланк протокола: найдёт токены #{NS.FIELD} и создаст черновик шаблона с полем на каждый токен">⇪ Импортировать .docx</button>
+        <button id="importDocxBtn" class="ghost" title="Загрузить реальный .docx-бланк протокола: найдёт токены #{NS.FIELD}. Если в редакторе уже открыт шаблон — уже настроенные поля не сбрасываются, подставляются заново по совпадению плейсхолдера, добавляются только новые">⇪ Импортировать .docx</button>
         <input id="importDocxInput" type="file" accept=".docx" hidden />
       </div>
       <input id="templateDescription" type="text" placeholder="Описание (необязательно)" />
-      <input id="templateQaPlaceholder" type="text"
-             placeholder="Плейсхолдер .docx для стенограммы «Вопрос/Ответ» (необязательно, напр. T1.DOC_PLOT)" />
+      <label class="section-label" for="templateQaPlaceholder" id="templateQaPlaceholderLabel">
+        Плейсхолдер .docx для стенограммы «Протокол диалога»</label>
+      <input id="templateQaPlaceholder" type="text" placeholder="напр. T1.DOC_PLOT" />
+      <p class="hint" id="templateQaPlaceholderHint">Обязательно для шаблона с привязанным .docx —
+        без него записанный диалог не попадёт в итоговый документ.</p>
       <div id="templateSteps" class="template-steps"></div>
       <div class="row">
         <button id="addStepBtn" class="ghost">+ Добавить шаг</button>

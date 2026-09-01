@@ -16,7 +16,10 @@ from typing import Callable
 
 from docx import Document
 
+from ..models import Template
+
 PLACEHOLDER_RE = re.compile(r"#\{([\w.]+)\}")
+JINJA_VAR_RE = re.compile(r"\{\{\s*([\w]+)\s*\}\}")
 
 
 def jinja_key(token: str) -> str:
@@ -69,6 +72,31 @@ def scan_placeholders(path) -> list[str]:
     for p in _iter_paragraphs(doc):
         found.update(PLACEHOLDER_RE.findall(_paragraph_text(p)))
     return sorted(found)
+
+
+def scan_jinja_keys(path) -> set[str]:
+    """Множество Jinja-переменных (`{{ VAR }}`, уже без точек), реально встречающихся в УЖЕ
+    нормализованном докс-бланке. Нужно `docgen.render` как страховка: набор шагов шаблона в
+    редакторе может разойтись с реальными плейсхолдерами файла (шаг удалили/переименовали
+    плейсхолдер вручную с опечаткой — реальный случай, воспроизведённый пользователем) — тогда
+    docxtpl тихо подставит пустую строку вместо `MISSING_MARKER`, и пропуск в документе останется
+    незамеченным при вычитке. Сканирование самого файла, а не списка шагов, ловит это независимо
+    от причины расхождения."""
+    doc = Document(path)
+    found: set[str] = set()
+    for p in _iter_paragraphs(doc):
+        found.update(JINJA_VAR_RE.findall(_paragraph_text(p)))
+    return found
+
+
+def uncovered_placeholders(tmpl: Template, docx_path) -> list[str]:
+    """Плейсхолдеры, реально встречающиеся в `docx_path`, но не покрытые ни одним шагом `tmpl` и
+    не выбранные как `qa_placeholder` (Блок 6) — см. `main.py::template_docx_coverage`. Отдельная
+    функция без завязки на TemplateStore/config — проверяется без поднятия сервера/хранилища."""
+    covered = {jinja_key(s.placeholder or s.key) for s in tmpl.steps}
+    if tmpl.qa_placeholder:
+        covered.add(jinja_key(tmpl.qa_placeholder))
+    return sorted(scan_jinja_keys(docx_path) - covered)
 
 
 def normalize_docx(src_path, dst_path) -> list[str]:

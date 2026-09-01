@@ -243,11 +243,16 @@ class OneShotRecorder {
 class AutoRecorder {
   constructor(deviceId, opts = {}) {
     this.deviceId = deviceId;
-    this.silenceToFinishMs = opts.silenceToFinishMs ?? 650;
+    // 1200, не 650 — короткая пауза между смысловыми частями ответа (вспомнить дату, число
+    // документа и т.п.) укладывалась в старый порог и обрубала запись раньше, чем ответ
+    // закончился (жалоба пользователя: «срабатывает раньше нужного»).
+    this.silenceToFinishMs = opts.silenceToFinishMs ?? 1200;
     this.minSpeechMs = opts.minSpeechMs ?? 180;
     this.maxWaitForSpeechMs = opts.maxWaitForSpeechMs ?? 12000;
     this.maxUtteranceMs = opts.maxUtteranceMs ?? 60000;
-    this.preRollMs = opts.preRollMs ?? 250;
+    // 400, не 250 — с запасом покрывает minSpeechMs (реакция VAD на начало речи), чтобы тихий
+    // старт ответа (a не сразу узнанное "порог превышен") не обрезался в начале записи.
+    this.preRollMs = opts.preRollMs ?? 400;
     this.energyThreshold = opts.energyThreshold ?? 0.008;   // тот же порядок, что серверный VAD_ENERGY_THRESHOLD
 
     this._chunks = [];        // Int16Array-куски финальной записи (с момента открытия реплики)

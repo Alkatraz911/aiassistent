@@ -18,6 +18,10 @@ backend/storage/sessions/
 # builtin-шаблон), коммитить нечего.
 backend/storage/templates/
 
+# Профиль оператора (Блок 6) — реальные персональные данные пользователя программы (ФИО/
+# должность следователя и т.п.), локальный рантайм-файл, не для репозитория.
+backend/storage/operator_profile.json
+
 # Модели ASR (кэш)
 backend/models/
 

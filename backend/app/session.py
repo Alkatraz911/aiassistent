@@ -641,11 +641,15 @@ class SessionManager:
     def any_streaming(self) -> bool:
         return any(s.streaming for s in self.sessions.values())
 
-    def transcribe_oneshot(self, pcm_int16: np.ndarray) -> str:
+    def transcribe_oneshot(self, pcm_int16: np.ndarray, initial_prompt: str | None = None) -> str:
         """Разовая транскрипция вне контекста сессии (анкета, `/api/transcribe`) — тоже идёт через
         общий планировщик (Блок 0.1), не напрямую в модель, чтобы не гоняться с live-стримингом
         за один и тот же инстанс. Синхронный (блокирующий) вызов — вызывающий REST-хендлер сам
-        оборачивает его в `asyncio.to_thread`."""
+        оборачивает его в `asyncio.to_thread`.
+
+        `initial_prompt` — оверрайд на конкретный вызов (Блок 6: контекст анкеты конкретной
+        сессии, см. main.py::transcribe_oneshot); `None` — обычное поведение, статичный
+        `config.WHISPER_PROMPT`."""
         pcm_f32 = pcm_int16.astype(np.float32) / 32768.0
         done = threading.Event()
         holder: dict = {}
@@ -657,7 +661,8 @@ class SessionManager:
         job = AsrJob(
             priority=PRIORITY_ONESHOT, seq=self.scheduler.next_seq(),
             session_id="_oneshot", channel=-1, kind="oneshot",
-            audio=pcm_f32, initial_prompt=config.WHISPER_PROMPT,
+            audio=pcm_f32,
+            initial_prompt=initial_prompt if initial_prompt is not None else config.WHISPER_PROMPT,
             provider_key=self._active_key, on_result=on_result,
         )
         self.scheduler.submit_oneshot(job)

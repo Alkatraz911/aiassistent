@@ -31,7 +31,8 @@ from pydantic import BaseModel
 
 from . import config, device, telemetry
 from .assistant import docgen, templates as templates_store
-from .assistant.docx_import import normalize_docx
+from .assistant import profile as profile_store
+from .assistant.docx_import import normalize_docx, uncovered_placeholders
 from .assistant.questionnaire import build_script
 from .models import Template, TemplateStep
 from .session import manager
@@ -168,7 +169,7 @@ class AnswerReq(BaseModel):
 def _step_payload(step) -> dict:
     return {"step": step.key, "label": step.label, "kind": step.kind,
             "prompt": step.prompt, "statement": step.statement, "question": step.question,
-            "needs_answer": step.kind != "info"}
+            "needs_answer": step.kind != "info", "source": step.source}
 
 
 @app.post("/api/assistant/start")
@@ -285,6 +286,63 @@ async def import_docx_template(file: UploadFile = File(...)) -> dict:
     return tmpl.model_dump()
 
 
+@app.get("/api/templates/{template_id}/coverage")
+def template_docx_coverage(template_id: str) -> dict:
+    """Плейсхолдеры, реально встречающиеся в привязанном .docx-бланке, но не покрытые НИ ОДНИМ
+    шагом (и не выбранные как qa_placeholder) — Блок 6, страховка от того, что при ручном
+    редактировании шаблона шаг удалили или переименовали плейсхолдер с опечаткой. Такой
+    плейсхолдер в итоговом документе тихо остаётся пустым (см. docgen.render), а голосовая
+    анкета вообще не спросит соответствующую ей информацию — оператор должен узнать об этом
+    сразу при сохранении шаблона, а не постфактум по готовому документу."""
+    tmpl = templates_store.store.get(template_id)
+    if tmpl is None:
+        return JSONResponse({"error": "шаблон не найден"}, status_code=404)
+    if not tmpl.docx_filename:
+        return {"missing": []}
+    docx_path = config.TEMPLATES_DIR / "docx" / tmpl.docx_filename
+    if not docx_path.exists():
+        return {"missing": []}
+    return {"missing": uncovered_placeholders(tmpl, docx_path)}
+
+
+# --- профиль оператора (Блок 6) -------------------------------------------
+# Значения полей с source="profile" (напр. «автор документа») — общие для всех сессий этого
+# пользователя программы, заполняются один раз, а не в каждой анкете (см. assistant/profile.py).
+
+@app.get("/api/profile/fields")
+def list_profile_fields() -> list[dict]:
+    """Все различные профильные токены (`placeholder or key`, где `source == "profile"`) из ВСЕХ
+    сохранённых шаблонов — чтобы клиент мог показать оператору одну общую форму настройки,
+    а не заставлять его открывать каждый шаблон отдельно. Дубли (разные шаблоны используют один
+    и тот же токен) схлопываются — берём подпись первого встреченного."""
+    seen: dict[str, str] = {}
+    for summary in templates_store.store.list():
+        tmpl = templates_store.store.get(summary.id)
+        if tmpl is None:
+            continue
+        for step in tmpl.steps:
+            if step.source != "profile":
+                continue
+            token = step.placeholder or step.key
+            if token and token not in seen:
+                seen[token] = step.label or token
+    return [{"placeholder": token, "label": label} for token, label in sorted(seen.items())]
+
+
+@app.get("/api/profile")
+def get_profile() -> dict[str, str]:
+    return profile_store.store.get_all()
+
+
+class ProfileSaveReq(BaseModel):
+    values: dict[str, str]
+
+
+@app.post("/api/profile")
+def save_profile(req: ProfileSaveReq) -> dict[str, str]:
+    return profile_store.store.update(req.values)
+
+
 @app.post("/api/protocol/{session_id}/docx")
 def generate_protocol_docx(session_id: str):
     """Заполняет докс-шаблон, привязанный к пройденному шаблону анкеты сессии, и отдаёт готовый
@@ -297,6 +355,12 @@ def generate_protocol_docx(session_id: str):
     if snapshot is None or not snapshot.docx_filename:
         return JSONResponse(
             {"error": "у шаблона этой сессии нет привязанного .docx-бланка"}, status_code=422)
+    # `protocol.questionnaire` — не живые данные, а снапшот, который синхронизируется из
+    # `assistant.answers` только внутри `Session.save()`. Без этого вызова здесь генерация
+    # молча уходила бы в MISSING_MARKER по всем полям анкеты, даже если оператор их надиктовал —
+    # реальный баг, воспроизведённый на живой сессии. `save()` заодно кладёт protocol.json на
+    # диск в состоянии, согласованном с только что сформированным .docx.
+    s.save()
     try:
         out_path = docgen.render(
             s.protocol,
@@ -313,14 +377,25 @@ def generate_protocol_docx(session_id: str):
 
 
 @app.post("/api/transcribe")
-async def transcribe_oneshot(request: Request) -> dict:
+async def transcribe_oneshot(request: Request, session_id: str | None = None) -> dict:
     """Разовая транскрипция куска (raw int16 LE, 16кГц моно) — для ответов анкеты. Идёт через
-    общий ASR-планировщик (Блок 0.1), не напрямую в модель — не гонится с live-стримингом."""
+    общий ASR-планировщик (Блок 0.1), не напрямую в модель — не гонится с live-стримингом.
+
+    `session_id` (Блок 6, опционально) — если передан и сессия существует, в initial_prompt
+    подмешивается `assistant.recent_context` (подтверждённые ответы этой же анкеты). Раньше
+    ответы анкеты распознавались с ГОЛЫМ статичным WHISPER_PROMPT без какого-либо контекста —
+    заметно хуже, чем реплики потокового распознавания, у которого initial_prompt всегда несёт
+    хвост уже распознанной речи того же канала (см. Session._build_prompt)."""
     raw = await request.body()
     if len(raw) < 2:
         return {"text": ""}
     pcm_int16 = np.frombuffer(raw, dtype="<i2")
-    text = await asyncio.to_thread(manager.transcribe_oneshot, pcm_int16)
+    prompt = None
+    if session_id:
+        s = manager.get(session_id)
+        if s is not None and s.assistant.recent_context:
+            prompt = f"{config.WHISPER_PROMPT} {s.assistant.recent_context}".strip()
+    text = await asyncio.to_thread(manager.transcribe_oneshot, pcm_int16, initial_prompt=prompt)
     return {"text": text}
 
 
@@ -341,6 +416,23 @@ def assistant_next(req: SessionReq) -> dict:
         return JSONResponse({"error": "no session"}, status_code=404)
     nxt = s.assistant.advance()
     return {"next": nxt, "fields": s.assistant.to_fields()}
+
+
+class FieldEditReq(BaseModel):
+    session_id: str
+    key: str
+    value: str
+
+
+@app.post("/api/assistant/field")
+def assistant_field_edit(req: FieldEditReq) -> dict:
+    """Прямая правка/заполнение поля анкеты по ключу, в обход последовательного хода анкеты
+    (Блок 6) — таблица «Поля анкеты» в клиенте редактируема, см. `AssistantSession.set_answer`."""
+    s = manager.get(req.session_id)
+    if not s:
+        return JSONResponse({"error": "no session"}, status_code=404)
+    ok = s.assistant.set_answer(req.key, req.value)
+    return {"ok": ok, "fields": s.assistant.to_fields()}
 
 
 # --- маркировка спикеров и правки ---------------------------------------

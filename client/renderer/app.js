@@ -241,6 +241,17 @@ function showStep(step) {
     $("assistantControls").hidden = true;
   }
 
+  // source="manual" (Блок 6) — оператор вводит значение сам с клавиатуры, это НЕ голосовой
+  // ответ опрашиваемого. Раньше такой шаг всё равно проходил через озвучку + автослушание —
+  // ассистент либо молчал (если formulировка не заполнена — see Step.prompt на бэкенде), либо
+  // впустую слушал 12 секунд тишины, что выглядело как «шаг вообще пропущен» (жалоба
+  // пользователя). Для manual сразу показываем поле ввода, без TTS и без микрофона.
+  if (step.source === "manual") {
+    if (!step.needs_answer) { advanceInfo(); return; }   // нечего вводить — как и в голосовом потоке
+    $("answerInput").focus();
+    return;
+  }
+
   // Сначала разъяснение (statement), затем сам вопрос (question) — озвучиваются по очереди;
   // автослушание стартует только после того, как TTS РЕАЛЬНО закончил, не по таймеру вслепую.
   const parts = [step.statement, step.question].filter(Boolean);
@@ -292,7 +303,7 @@ async function finishAutoListening() {
   const pcm = autoRec.stop();
   autoRec = null;
   if (!pcm.length) return;
-  const r = await fetch(`${HTTP}/api/transcribe`, {
+  const r = await fetch(`${HTTP}/api/transcribe?session_id=${encodeURIComponent(SESSION)}`, {
     method: "POST", headers: { "Content-Type": "application/octet-stream" },
     body: pcm.buffer,
   }).then((x) => x.json());
@@ -392,13 +403,13 @@ function stepRowTemplate(step) {
     </div>
     <div class="step-meta">
       <label>Тип
-        <select class="step-kind">
+        <select class="step-kind" title="«Только зачитать» — ответ вообще не запрашивается и не сохраняется (для разъяснений прав и т.п.). Для полей с данными, даже вводимых вручную, нужен «вопрос с ответом».">
           <option value="field">вопрос с ответом</option>
           <option value="confirm">да/нет</option>
-          <option value="info">только текст</option>
+          <option value="info">только зачитать (без ответа)</option>
         </select>
       </label>
-      <label>Извлечение
+      <label class="step-extractor-label">Извлечение
         <select class="step-extractor">
           <option value="plain">как есть</option>
           <option value="fio">ФИО</option>
@@ -407,10 +418,20 @@ function stepRowTemplate(step) {
           <option value="none">не сохранять</option>
         </select>
       </label>
+      <label class="step-auto-kind-label" hidden>Авто-поле
+        <select class="step-auto-kind">
+          <option value="date">сегодняшняя дата</option>
+          <option value="time_start">время начала опроса</option>
+          <option value="time_end">время окончания опроса</option>
+          <option value="time_range">время начала и окончания одной строкой</option>
+        </select>
+      </label>
       <label>Источник
         <select class="step-source">
           <option value="asr">голосом (ASR)</option>
-          <option value="manual">текстом вручную</option>
+          <option value="manual">текстом вручную (каждый раз)</option>
+          <option value="profile">из профиля оператора (один раз навсегда)</option>
+          <option value="auto">автоматически (дата/время опроса)</option>
         </select>
       </label>
       <label>Плейсхолдер .docx
@@ -424,8 +445,22 @@ function stepRowTemplate(step) {
     </div>
   `;
   row.querySelector(".step-kind").value = step.kind || "field";
-  row.querySelector(".step-extractor").value = step.extractor || "plain";
+  const AUTO_KINDS = ["date", "time_start", "time_end", "time_range"];
+  const isAuto = step.source === "auto";
+  row.querySelector(".step-extractor").value = (!isAuto && step.extractor) || "plain";
+  row.querySelector(".step-auto-kind").value = (isAuto && AUTO_KINDS.includes(step.extractor))
+    ? step.extractor : "date";
   row.querySelector(".step-source").value = step.source || "asr";
+  // Извлечение (ASR) и Авто-поле — два разных смысла одного и того же значения `extractor`
+  // (см. models.py::TemplateStep.source), одновременно оба показывать незачем — путает, какое
+  // из них сейчас реально используется.
+  const toggleAutoUi = () => {
+    const auto = row.querySelector(".step-source").value === "auto";
+    row.querySelector(".step-extractor-label").hidden = auto;
+    row.querySelector(".step-auto-kind-label").hidden = !auto;
+  };
+  toggleAutoUi();
+  row.querySelector(".step-source").onchange = toggleAutoUi;
   row.dataset.key = step.key || ("step" + Math.random().toString(36).slice(2, 8));
   row.querySelector(".step-remove").onclick = () => row.remove();
   row.querySelector(".step-up").onclick = () => {
@@ -441,6 +476,46 @@ function stepRowTemplate(step) {
 
 function escAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+// ---------- профиль оператора (Блок 6) ----------
+async function openProfileModal() {
+  $("profileHint").textContent = "";
+  const box = $("profileFields");
+  box.innerHTML = "";
+  const [fields, values] = await Promise.all([
+    fetch(`${HTTP}/api/profile/fields`).then((x) => x.json()),
+    fetch(`${HTTP}/api/profile`).then((x) => x.json()),
+  ]);
+  if (!fields.length) {
+    box.innerHTML = '<p class="hint">Пока нет ни одного поля с источником «из профиля '
+      + 'оператора» ни в одном шаблоне — добавьте его в редакторе шаблона (Источник → '
+      + '«из профиля оператора»).</p>';
+  } else {
+    fields.forEach((f) => {
+      const row = document.createElement("label");
+      row.style.display = "block";
+      row.style.marginBottom = "10px";
+      row.innerHTML = `${escAttr(f.label)}
+        <input type="text" data-placeholder="${escAttr(f.placeholder)}"
+               value="${escAttr(values[f.placeholder] || "")}" />`;
+      box.appendChild(row);
+    });
+  }
+  $("profileModal").hidden = false;
+}
+
+async function saveProfile() {
+  const values = {};
+  document.querySelectorAll("#profileFields input").forEach((i) => {
+    values[i.dataset.placeholder] = i.value.trim();
+  });
+  const r = await fetch(`${HTTP}/api/profile`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values }),
+  });
+  if (!r.ok) { $("profileHint").textContent = "Не удалось сохранить профиль."; return; }
+  $("profileModal").hidden = true;
 }
 
 async function openTemplateEditor(templateId) {
@@ -465,17 +540,28 @@ async function openTemplateEditor(templateId) {
   }
   $("templateName").value = tmpl.name || "";
   $("templateDescription").value = tmpl.description || "";
-  $("templateQaPlaceholder").value = tmpl.qa_placeholder || "";
   // Существующий шаблон уже привязан к своему докс-файлу на сервере — сохраняем ссылку на него,
   // чтобы PUT-редактирование не потеряло привязку (docx_filename не восстанавливается сам по себе).
   state.importedDocxFilename = tmpl.docx_filename || null;
   (tmpl.steps || []).forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
+  $("templateQaPlaceholder").value = tmpl.qa_placeholder || "";
+  refreshQaPlaceholderRequired();
   $("templateDeleteBtn").hidden = !state.editingTemplateId;
   $("templateModal").hidden = false;
 }
 
 async function importDocxTemplate(file) {
   if (!file) return;
+  // Если в редакторе уже открыт шаблон (создавали ли его импортом раньше или вручную) — это
+  // ПЕРЕимпорт того же протокола (например, чтобы подхватить исправленный .docx или заново
+  // просканировать плейсхолдеры после починки багов), а не создание нового с нуля. Название,
+  // формулировки, источники и т.п. уже настроены руками — переносить их заново не хочется
+  // (жалоба пользователя). Ловим ДО того, как перезапишем templateSteps черновиком.
+  const isReimport = $("templateSteps").querySelectorAll(".step-row").length > 0;
+  const oldSteps = isReimport ? collectStepsFromEditor() : [];
+  const oldByPlaceholder = new Map(oldSteps.filter((s) => s.placeholder).map((s) => [s.placeholder, s]));
+  const oldWithoutPlaceholder = oldSteps.filter((s) => !s.placeholder);   // свои шаги вне докса
+
   $("templateHint").textContent = "Импортирую .docx…";
   const form = new FormData();
   form.append("file", file);
@@ -488,23 +574,46 @@ async function importDocxTemplate(file) {
     $("templateHint").textContent = "Ошибка импорта: " + e;
     return;
   }
-  // Черновик не сохранён в хранилище шаблонов (см. main.py::import_docx_template) — оператор
-  // донастраивает поля и сохраняет через обычный saveTemplate(), который должен создать НОВЫЙ
-  // шаблон с id/docx_filename из черновика, а не отредактировать текущий (если он был открыт).
-  state.editingTemplateId = null;
+  // Черновик из /api/templates/import_docx не сохранён в хранилище (см. main.py) — это только
+  // свежий докс-файл + список найденных в нём токенов. Дальше для каждого токена подставляем
+  // УЖЕ настроенный шаг, если он был (по совпадению placeholder), иначе — заготовку по умолчанию.
+  const mergedSteps = (draft.steps || []).map((s) => oldByPlaceholder.get(s.placeholder) || s);
+  const newCount = mergedSteps.filter((s) => !oldByPlaceholder.has(s.placeholder)).length;
+
   state.importedDocxId = draft.id;
   state.importedDocxFilename = draft.docx_filename;
-  $("templateName").value = "";
-  $("templateDescription").value = "";
-  $("templateQaPlaceholder").value = "";
-  $("templateModalTitle").textContent = "Новый шаблон из .docx";
-  $("templateDeleteBtn").hidden = true;
+  if (!isReimport) {
+    // По-настоящему новый шаблон с нуля — раньше это был единственный сценарий импорта.
+    state.editingTemplateId = null;
+    $("templateName").value = "";
+    $("templateDescription").value = "";
+    $("templateQaPlaceholder").value = "";
+    $("templateModalTitle").textContent = "Новый шаблон из .docx";
+    $("templateDeleteBtn").hidden = true;
+  }
+  // state.editingTemplateId, название, описание и qa_placeholder при переимпорте НЕ трогаем —
+  // сохранение (PUT) обновит тот же шаблон на месте с новым docx_filename и слитыми шагами.
   const stepsBox = $("templateSteps");
   stepsBox.innerHTML = "";
-  (draft.steps || []).forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
-  $("templateHint").textContent =
-    `Найдено полей: ${(draft.steps || []).length}. Заполните название, при необходимости — ` +
-    `вопросы/формулировки для каждого поля, и вопрос стенограммы (QA-плейсхолдер), затем сохраните.`;
+  mergedSteps.forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
+  oldWithoutPlaceholder.forEach((s) => stepsBox.appendChild(stepRowTemplate(s)));
+  refreshQaPlaceholderRequired();
+  $("templateHint").textContent = isReimport
+    ? `Переимпорт: ${mergedSteps.length} полей найдено в .docx, из них новых — ${newCount}. ` +
+      `Настройки уже существующих полей сохранены. Проверьте новые поля и сохраните.`
+    : `Найдено полей: ${mergedSteps.length}. Заполните название, при необходимости — ` +
+      `вопросы/формулировки для каждого поля, и плейсхолдер для протокола диалога, затем сохраните.`;
+}
+
+// Плейсхолдер «Протокол диалога» — обязателен только когда к шаблону привязан .docx: у чисто
+// голосовых анкет (без докса) поле ни на что не влияет и не должно блокировать сохранение.
+function refreshQaPlaceholderRequired() {
+  const required = !!state.importedDocxFilename;
+  $("templateQaPlaceholder").required = required;
+  $("templateQaPlaceholderHint").classList.toggle("required", required);
+  $("templateQaPlaceholderHint").textContent = required
+    ? "Обязательно: без него записанный диалог не попадёт в итоговый документ."
+    : "Впишите, если хотите вставлять в документ записанный диалог (актуально только для шаблонов с .docx).";
 }
 
 function slugify(label, fallback) {
@@ -521,11 +630,16 @@ function collectStepsFromEditor() {
     let key = slugify(label, row.dataset.key || `step${i}`);
     while (used.has(key)) key += "_2";
     used.add(key);
+    const source = row.querySelector(".step-source").value;
     return {
       key, label,
       kind: row.querySelector(".step-kind").value,
-      extractor: row.querySelector(".step-extractor").value,
-      source: row.querySelector(".step-source").value,
+      // Для source="auto" `extractor` — не имя ASR-извлекателя, а выбранное авто-поле
+      // (см. models.py::TemplateStep.source и docgen.AUTO_FIELDS).
+      extractor: source === "auto"
+        ? row.querySelector(".step-auto-kind").value
+        : row.querySelector(".step-extractor").value,
+      source,
       placeholder: row.querySelector(".step-placeholder").value.trim(),
       statement: row.querySelector(".step-statement").value.trim(),
       question: row.querySelector(".step-question").value.trim(),
@@ -538,10 +652,32 @@ async function saveTemplate() {
   if (!name) { $("templateHint").textContent = "Укажите название шаблона."; return; }
   const steps = collectStepsFromEditor();
   if (!steps.length) { $("templateHint").textContent = "Добавьте хотя бы один шаг."; return; }
+  const qaPlaceholder = $("templateQaPlaceholder").value.trim() || null;
+  // Обязательно у шаблонов с докс-файлом — иначе записанный диалог молча не попадёт в
+  // итоговый документ (docgen.render просто не знает, в какой плейсхолдер его вставлять).
+  if (state.importedDocxFilename && !qaPlaceholder) {
+    $("templateHint").textContent =
+      "Впишите плейсхолдер для стенограммы «Протокол диалога» — без него записанный диалог не попадёт в документ.";
+    return;
+  }
+  // «Только зачитать» (kind=info) — это НЕ «поле без специальной обработки»: ответ на такой шаг
+  // вообще не запрашивается и не сохраняется (см. AssistantSession.to_fields/submit_answer), так
+  // что привязанный к нему плейсхолдер никогда не заполнится. Реальная ошибка пользователя —
+  // спутал с «Извлечение → как есть». Предупреждаем, но не блокируем — мало ли реальный случай.
+  const infoWithPlaceholder = steps.filter((s) => s.kind === "info" && s.placeholder);
+  if (infoWithPlaceholder.length) {
+    const list = infoWithPlaceholder.map((s) => `«${s.label}» (${s.placeholder})`).join(", ");
+    if (!confirm(
+      `У шагов с типом «только зачитать» указан плейсхолдер — их значение НИКОГДА не сохранится ` +
+      `(ответ на такой шаг вообще не запрашивается): ${list}.\n\n` +
+      `Если это поле должно заполняться (оператором вручную или голосом), смените Тип на ` +
+      `«вопрос с ответом».\n\nВсё равно сохранить как есть?`
+    )) return;
+  }
   const payload = {
     name, description: $("templateDescription").value.trim(), steps,
     docx_filename: state.importedDocxFilename || null,
-    qa_placeholder: $("templateQaPlaceholder").value.trim() || null,
+    qa_placeholder: qaPlaceholder,
   };
   // id значим только при создании нового шаблона из импортированного .docx-черновика (см.
   // importDocxTemplate) — без него сохранённый шаблон получил бы другой id, и уже
@@ -558,6 +694,23 @@ async function saveTemplate() {
   await loadTemplates();
   $("templateSelect").value = data.id;
   state.templateId = data.id;
+  await warnAboutUncoveredPlaceholders(data.id);
+}
+
+// Плейсхолдеры бланка без единого привязанного шага (Блок 6) — реальный случай: при
+// редактировании шаблона шаг удалили или переименовали плейсхолдер с опечаткой, и такое поле в
+// итоговом документе тихо остаётся пустым, а голосовая анкета вообще не спросит нужные данные.
+// Не блокирует сохранение — иногда часть плейсхолдеров бланка оставляют незаполненной осознанно.
+async function warnAboutUncoveredPlaceholders(templateId) {
+  try {
+    const r = await fetch(`${HTTP}/api/templates/${templateId}/coverage`);
+    const data = await r.json();
+    if (data.missing && data.missing.length) {
+      alert("В .docx-бланке есть поля без привязанного шага анкеты — они останутся пустыми в "
+        + "документе:\n\n" + data.missing.join(", ")
+        + "\n\nДобавьте для них шаги в редакторе шаблона.");
+    }
+  } catch {}
 }
 
 async function deleteTemplateConfirm() {
@@ -597,7 +750,7 @@ async function toggleRecordAnswer() {
     answerRec = null;
     btn.textContent = "🎤 Ответ голосом";
     btn.style.background = ""; btn.style.color = "";
-    const r = await fetch(`${HTTP}/api/transcribe`, {
+    const r = await fetch(`${HTTP}/api/transcribe?session_id=${encodeURIComponent(SESSION)}`, {
       method: "POST", headers: { "Content-Type": "application/octet-stream" },
       body: pcm.buffer,
     }).then((x) => x.json());
@@ -605,15 +758,38 @@ async function toggleRecordAnswer() {
   }
 }
 
+// Значение поля редактируется прямо в таблице (Блок 6): окно автоподтверждения голосового
+// ответа висит пару секунд — оператор часто не успевает нажать «исправить», а поля с
+// source="manual" вообще не задумывались как голосовые — таблица должна быть основным способом
+// их заполнения, не только резервной правкой.
 function renderFields(fields) {
   const tb = $("fieldsTable").querySelector("tbody");
   tb.innerHTML = "";
   (fields || []).forEach((f) => {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td class="k">${f.label}</td>
-      <td class="v ${f.value ? "filled" : ""}">${f.value || "—"}</td>`;
+    const k = document.createElement("td");
+    k.className = "k";
+    k.textContent = f.label;
+    const v = document.createElement("td");
+    v.className = "v" + (f.value ? " filled" : "");
+    v.contentEditable = "true";
+    v.textContent = f.value || "";
+    v.dataset.placeholder = "—";   // см. CSS: пустая ячейка показывает плейсхолдер, не теряя редактируемость
+    v.addEventListener("blur", () => saveFieldEdit(f.key, v));
+    tr.appendChild(k);
+    tr.appendChild(v);
     tb.appendChild(tr);
   });
+}
+
+async function saveFieldEdit(key, td) {
+  const value = td.innerText.trim();
+  const r = await fetch(`${HTTP}/api/assistant/field`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION, key, value }),
+  }).then((x) => x.json());
+  if (!r.ok) return;   // ключа нет в текущем сценарии — сюда в норме не попасть, но не рвём UI
+  td.classList.toggle("filled", !!value);
 }
 
 // ---------- Протокол: стриминг (Блок 2 — partial/stable/final) ----------
@@ -1020,6 +1196,23 @@ async function generateProtocolDocx() {
   }
 }
 
+// ---------- клик вне модалки закрывает её ----------
+function initModalBackdropClose() {
+  // "click" одним условием (target === modal) ловит не только клик по фону, но и выделение
+  // текста в узком поле внутри карточки: пока тянешь мышь, курсор легко уезжает за пределы
+  // инпута на фон модалки, и click-событие засчитывается по фону — модалка закрывалась прямо
+  // посреди выделения (жалоба пользователя). Значит закрывать нужно, только если И нажатие,
+  // И отпускание мыши пришлись именно на фон, а не по итоговой точке составного клика.
+  document.querySelectorAll(".modal").forEach((modal) => {
+    let downOnBackdrop = false;
+    modal.addEventListener("mousedown", (e) => { downOnBackdrop = e.target === modal; });
+    modal.addEventListener("mouseup", (e) => {
+      if (downOnBackdrop && e.target === modal) modal.hidden = true;
+      downOnBackdrop = false;
+    });
+  });
+}
+
 // ---------- перетаскиваемая граница между анкетой и протоколом диалога ----------
 const SPLITTER_MIN = 300;      // ужать анкету настолько, чтобы поля ещё влезали без переноса
 const SPLITTER_STORAGE_KEY = "protocolAssistant.leftWidth";
@@ -1080,6 +1273,10 @@ function bind() {
     b.onclick = () => applySpeaker(b.dataset.v);
   });
 
+  $("operatorProfileBtn").onclick = openProfileModal;
+  $("profileCancel").onclick = () => ($("profileModal").hidden = true);
+  $("profileSaveBtn").onclick = saveProfile;
+
   $("templateSelect").onchange = () => { state.templateId = $("templateSelect").value || null; };
   $("newTemplateBtn").onclick = () => openTemplateEditor(null);
   $("editTemplateBtn").onclick = () => {
@@ -1102,6 +1299,7 @@ function bind() {
 
 bind();
 initSplitter();
+initModalBackdropClose();
 checkHealth();
 loadMics();
 loadModels();

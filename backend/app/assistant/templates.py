@@ -21,6 +21,17 @@ BUILTIN_ID = "default"
 BUILTIN_NAME = "Стандартный (протокол опроса)"
 
 
+def _validate_docx_binding(docx_filename: str | None, qa_placeholder: str | None) -> None:
+    """У шаблона с привязанным .docx-бланком плейсхолдер стенограммы обязателен — иначе
+    docgen.render просто не будет знать, куда вставлять записанный диалог, и тот молча не попадёт
+    в итоговый документ (реальный баг, воспроизведённый пользователем). Дублирует проверку на
+    клиенте (см. saveTemplate() в app.js) — здесь на случай прямого вызова API в обход UI."""
+    if docx_filename and not qa_placeholder:
+        raise ValueError(
+            "у шаблона с .docx-бланком должен быть указан qa_placeholder — иначе записанный "
+            "диалог не попадёт в итоговый документ")
+
+
 def _validate_unique_keys(steps: list[TemplateStep]) -> None:
     seen: set[str] = set()
     for s in steps:
@@ -86,6 +97,7 @@ class TemplateStore:
         сохранённый шаблон получил бы ДРУГОЙ id, и файл `docx/<новый_id>.docx` осиротел бы,
         не будучи ни на что не сославшимся). `None` — обычное поведение, id генерируется сам."""
         _validate_unique_keys(steps)
+        _validate_docx_binding(docx_filename, qa_placeholder)
         kwargs = dict(name=name, description=description, steps=steps,
                       docx_filename=docx_filename, qa_placeholder=qa_placeholder)
         if id:
@@ -108,6 +120,7 @@ class TemplateStore:
         if existing.is_builtin:
             raise PermissionError("builtin-шаблон нельзя редактировать — создайте копию")
         _validate_unique_keys(steps)
+        _validate_docx_binding(docx_filename, qa_placeholder)
         updated = existing.model_copy(update={
             "name": name, "description": description, "steps": steps,
             "docx_filename": docx_filename, "qa_placeholder": qa_placeholder,
