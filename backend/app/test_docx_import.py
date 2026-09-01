@@ -47,10 +47,14 @@ def _build_fixture_docx() -> io.BytesIO:
 
 
 def test_scan_placeholders_finds_split_and_inline_tokens() -> None:
+    """Порядок — В ПОРЯДКЕ ПОЯВЛЕНИЯ в документе (T1.FOO в абзаце 1, T1.BAR в абзаце 2), НЕ
+    алфавитный: при импорте .docx этот порядок становится порядком шагов анкеты, а он должен
+    совпадать с хронологией допроса (реальное требование пользователя). Алфавитный порядок дал
+    бы обратный результат ([T1.BAR, T1.FOO]) — тест бы этого не пропустил."""
     buf = _build_fixture_docx()
     tokens = scan_placeholders(buf)
     print(f"найденные токены: {tokens}")
-    assert tokens == ["T1.BAR", "T1.FOO"]
+    assert tokens == ["T1.FOO", "T1.BAR"]
 
 
 def test_normalize_docx_rewrites_tokens_and_keeps_surrounding_text() -> None:
@@ -59,7 +63,7 @@ def test_normalize_docx_rewrites_tokens_and_keeps_surrounding_text() -> None:
         out_path = Path(tmp) / "normalized.docx"
         found = normalize_docx(buf, out_path)
         print(f"нормализовано токенов: {found}")
-        assert found == ["T1.BAR", "T1.FOO"]
+        assert found == ["T1.FOO", "T1.BAR"]   # порядок появления, не алфавитный
         doc = Document(out_path)
     full_text = "\n".join("".join(r.text for r in p.runs) for p in doc.paragraphs)
     print(f"текст после нормализации:\n{full_text}")

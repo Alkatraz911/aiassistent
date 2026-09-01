@@ -389,11 +389,14 @@ async function loadTemplates() {
   } catch {}
 }
 
+let draggedStepRow = null;   // текущий перетаскиваемый .step-row (один редактор шаблона зараз)
+
 function stepRowTemplate(step) {
   const row = document.createElement("div");
   row.className = "step-row";
   row.innerHTML = `
     <div class="step-head">
+      <span class="step-drag" draggable="true" title="Перетащите, чтобы изменить порядок">⠿</span>
       <input class="step-label" type="text" placeholder="Название шага" value="${escAttr(step.label || "")}" />
       <div class="step-order">
         <button type="button" class="step-up" title="Выше">▲</button>
@@ -471,6 +474,29 @@ function stepRowTemplate(step) {
     const next = row.nextElementSibling;
     if (next) row.parentNode.insertBefore(next, row);
   };
+
+  // Drag-and-drop реордер (в дополнение к ▲/▼ — тем удобнее менять порядок на одну позицию,
+  // этим на несколько сразу). Хендл — отдельный элемент, а не вся строка: иначе перетаскивание
+  // текста в поле «Название шага» (выделение мышью) конфликтовало бы с перетаскиванием шага.
+  const handle = row.querySelector(".step-drag");
+  handle.addEventListener("dragstart", (e) => {
+    draggedStepRow = row;
+    row.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", "");   // Firefox не начинает drag без данных
+  });
+  handle.addEventListener("dragend", () => {
+    row.classList.remove("dragging");
+    draggedStepRow = null;
+  });
+  row.addEventListener("dragover", (e) => {
+    if (!draggedStepRow || draggedStepRow === row) return;
+    e.preventDefault();   // разрешить drop именно сюда
+    const rect = row.getBoundingClientRect();
+    const before = e.clientY - rect.top < rect.height / 2;
+    row.parentNode.insertBefore(draggedStepRow, before ? row : row.nextSibling);
+  });
+  row.addEventListener("drop", (e) => e.preventDefault());
   return row;
 }
 

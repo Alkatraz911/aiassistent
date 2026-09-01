@@ -66,12 +66,17 @@ def _replace_in_paragraph(p, transform: Callable[[str], str]) -> None:
 
 
 def scan_placeholders(path) -> list[str]:
-    """Отсортированный список уникальных токенов `#{...}`, найденных во всём документе."""
+    """Уникальные токены `#{...}`, найденные во всём документе, В ПОРЯДКЕ ПОЯВЛЕНИЯ в тексте
+    (не алфавитном!) — при импорте этот порядок становится порядком шагов анкеты, а он должен
+    совпадать с хронологией допроса (реальное требование пользователя: порядок вопросов важен
+    сам по себе). `dict.fromkeys` — идиома для дедупликации с сохранением порядка первого
+    вхождения (обычный `set` порядок не гарантирует)."""
     doc = Document(path)
-    found: set[str] = set()
+    found: dict[str, None] = {}
     for p in _iter_paragraphs(doc):
-        found.update(PLACEHOLDER_RE.findall(_paragraph_text(p)))
-    return sorted(found)
+        for token in PLACEHOLDER_RE.findall(_paragraph_text(p)):
+            found.setdefault(token, None)
+    return list(found)
 
 
 def scan_jinja_keys(path) -> set[str]:
@@ -102,16 +107,17 @@ def uncovered_placeholders(tmpl: Template, docx_path) -> list[str]:
 def normalize_docx(src_path, dst_path) -> list[str]:
     """Переписывает все `#{TOKEN}` в `{{ TOKEN_с_подчёркиванием }}` и сохраняет результат в
     `dst_path`. `src_path` — что угодно, что принимает `docx.Document()` (путь или file-like,
-    например `io.BytesIO` из загруженного файла). Возвращает отсортированный список уникальных
-    ИСХОДНЫХ токенов (считаем их во время самого прохода замены, а не повторным сканированием —
-    после замены токенов в тексте уже не остаётся)."""
+    например `io.BytesIO` из загруженного файла). Возвращает уникальные ИСХОДНЫЕ токены В ПОРЯДКЕ
+    ПОЯВЛЕНИЯ в документе (не алфавитном — см. `scan_placeholders`; считаем их во время самого
+    прохода замены, а не повторным сканированием — после замены токенов в тексте уже не
+    остаётся)."""
     doc = Document(src_path)
-    found: set[str] = set()
+    found: dict[str, None] = {}
 
     def transform(text: str) -> str:
         def _sub(m: re.Match) -> str:
             token = m.group(1)
-            found.add(token)
+            found.setdefault(token, None)
             return "{{ " + jinja_key(token) + " }}"
         return PLACEHOLDER_RE.sub(_sub, text)
 
@@ -121,4 +127,4 @@ def normalize_docx(src_path, dst_path) -> list[str]:
     dst_path = Path(dst_path)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(dst_path))
-    return sorted(found)
+    return list(found)
