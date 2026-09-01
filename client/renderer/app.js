@@ -484,20 +484,57 @@ function stepRowTemplate(step) {
     row.classList.add("dragging");
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", "");   // Firefox не начинает drag без данных
+    startStepDragAutoScroll(row.closest(".modal-card-wide"));
   });
   handle.addEventListener("dragend", () => {
     row.classList.remove("dragging");
     draggedStepRow = null;
+    stopStepDragAutoScroll();
   });
   row.addEventListener("dragover", (e) => {
     if (!draggedStepRow || draggedStepRow === row) return;
     e.preventDefault();   // разрешить drop именно сюда
+    dragAutoScrollPointerY = e.clientY;   // автоскролл читает это на каждом кадре, см. ниже
     const rect = row.getBoundingClientRect();
     const before = e.clientY - rect.top < rect.height / 2;
     row.parentNode.insertBefore(draggedStepRow, before ? row : row.nextSibling);
   });
   row.addEventListener("drop", (e) => e.preventDefault());
   return row;
+}
+
+// Автоскролл списка шагов во время drag-and-drop (Блок 6): нативный HTML5 DnD автоскроллит
+// только document/window, а список шагов скроллится ВНУТРИ модалки (.modal-card-wide) — без
+// этого перетащить шаг из конца длинного списка в начало было физически невозможно (жалоба
+// пользователя). requestAnimationFrame, а не сам dragover — dragover у неподвижного курсора
+// срабатывает нерегулярно (раз в ~350мс по спеке), рывками, а не плавно.
+let dragAutoScrollPointerY = null;
+let dragAutoScrollHandle = null;
+
+function startStepDragAutoScroll(container) {
+  if (!container) return;
+  const EDGE = 60, MAX_SPEED = 16;
+  const tick = () => {
+    if (!draggedStepRow) { dragAutoScrollHandle = null; return; }   // drag уже закончен
+    if (dragAutoScrollPointerY !== null) {
+      const rect = container.getBoundingClientRect();
+      let delta = 0;
+      if (dragAutoScrollPointerY < rect.top + EDGE) {
+        delta = -MAX_SPEED * (1 - (dragAutoScrollPointerY - rect.top) / EDGE);
+      } else if (dragAutoScrollPointerY > rect.bottom - EDGE) {
+        delta = MAX_SPEED * (1 - (rect.bottom - dragAutoScrollPointerY) / EDGE);
+      }
+      if (delta) container.scrollTop += delta;
+    }
+    dragAutoScrollHandle = requestAnimationFrame(tick);
+  };
+  dragAutoScrollHandle = requestAnimationFrame(tick);
+}
+
+function stopStepDragAutoScroll() {
+  if (dragAutoScrollHandle) cancelAnimationFrame(dragAutoScrollHandle);
+  dragAutoScrollHandle = null;
+  dragAutoScrollPointerY = null;
 }
 
 function escAttr(s) {
