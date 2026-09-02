@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import bisect
 import threading
+import time
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -161,6 +162,13 @@ class Session:
         self.loop = loop
         self.out_queue = out_queue
         self.streaming = True
+        # Якорь для «время начала/окончания опроса» (Блок 6, docgen.AUTO_FIELDS) — только на
+        # ПЕРВЫЙ заход: относительный таймлайн сегментов (start/end, секунды от начала записи)
+        # непрерывен на всю жизнь Session (RollingBuffer._total_samples не сбрасывается между
+        # заходами), так что этот единственный якорь плюс segment.start/.end время реплики даёт
+        # верное реальное время даже после «стоп» -> «начать снова».
+        if self.protocol.recording_started_at is None:
+            self.protocol.recording_started_at = time.time()
 
     def detach_ws(self) -> None:
         self.loop = None
@@ -427,11 +435,18 @@ class Session:
         msg = {"type": "asr_final", "channel": channel, "utterance_id": hyp.utterance_id, "text": text}
         if text:
             label = self.speaker_label(channel)
+            # created_at — РЕАЛЬНЫЙ момент речи (recording_started_at + позиция на аудио-
+            # таймлайне), а не момент, когда до этой реплики дошла очередь ASR. Иначе несколько
+            # реплик, ждавших очереди и финализированных подряд сразу после «Стоп», получили бы
+            # created_at, совпадающий с точностью до секунды, хотя реально прозвучали в разное
+            # время — и «время начала»/«время окончания» опроса (Блок 6, docgen.AUTO_FIELDS)
+            # совпадали бы (реальный баг, воспроизведённый пользователем).
+            recorded_at = (self.protocol.recording_started_at or time.time()) + all_words[0].start
             seg = Segment(
                 channel=channel, speaker=label, speaker_auto=f"Голос-{channel + 1}",
                 start=all_words[0].start, end=all_words[-1].end, text=text, text_original=text,
                 words=[Word(text=w.text, start=w.start, end=w.end, prob=w.prob) for w in all_words],
-                own_snr_db=hyp.avg_snr_db,
+                own_snr_db=hyp.avg_snr_db, created_at=recorded_at,
             )
             # Вставляем по времени начала, а не в конец: финал из устаревшего захода записи
             # (см. epoch выше) может «доехать» позже, чем сегменты нового захода, которые уже

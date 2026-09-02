@@ -141,6 +141,11 @@ class Protocol(BaseModel):
     """Полный протокол сессии."""
     session_id: str
     created_at: float = Field(default_factory=time.time)
+    # Wall-clock момент первого же старта записи диалога (Session.attach_ws, только при первом
+    # вызове — повторные «начать/остановить» его не трогают). Отдельно от `created_at`: сессия
+    # создаётся при старте анкеты, которая может идти долго ДО того, как реально нажали «Начать
+    # запись» — `created_at` в это время был бы неверным якорем для времени допроса.
+    recording_started_at: Optional[float] = None
     title: str = "Протокол опроса"
     questionnaire: list[QuestionnaireField] = Field(default_factory=list)
     segments: list[Segment] = Field(default_factory=list)

@@ -188,6 +188,23 @@ def test_prompt_has_no_recent_speech() -> None:
     print("PROMPT_NO_RECENT_SPEECH OK ✅")
 
 
+def test_recording_started_at_set_once() -> None:
+    """Блок 6: `protocol.recording_started_at` — якорь для «время начала/окончания опроса»
+    (docgen.AUTO_FIELDS). Реальный баг: если ставить его на КАЖДЫЙ `attach_ws` («стоп» ->
+    «начать снова»), несколько реплик, ждавших очереди ASR и финализированных подряд сразу
+    после «стоп», получали бы одинаковое время — start и end совпадали. Якорь должен
+    фиксироваться один раз, на первый заход."""
+    s = manager.create("smoke-recording-anchor")
+    assert s.protocol.recording_started_at is None, "до первого attach_ws якоря быть не должно"
+    s.attach_ws(None, None)
+    first = s.protocol.recording_started_at
+    assert first is not None
+    s.detach_ws()
+    s.attach_ws(None, None)   # второй заход — «стоп» -> «начать снова»
+    assert s.protocol.recording_started_at == first, "якорь не должен сбрасываться между заходами"
+    print("RECORDING_STARTED_AT_ONCE OK ✅")
+
+
 def test_rename_speaker_after_diarization() -> None:
     """После диаризации общего микрофона в ОДНОМ канале лежат разные спикеры, поэтому
     переименование должно идти по метке голоса, а не по каналу.
@@ -333,6 +350,7 @@ def main() -> None:
     print("\n--- эхо initial_prompt и заученные титры ---")
     test_prompt_echo_filter()
     test_prompt_has_no_recent_speech()
+    test_recording_started_at_set_once()
     test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")
