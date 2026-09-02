@@ -252,8 +252,6 @@ def update_template(template_id: str, req: TemplateSaveReq) -> dict:
 def delete_template(template_id: str) -> dict:
     try:
         ok = templates_store.store.delete(template_id)
-    except PermissionError as e:
-        return JSONResponse({"error": str(e)}, status_code=403)
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=409)
     if not ok:

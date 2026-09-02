@@ -382,20 +382,15 @@ async function loadTemplates() {
       const o = document.createElement("option");
       o.value = t.id;
       o.textContent = `${t.name}${t.is_builtin ? " (стандартный)" : ""} — ${t.step_count} шаг.`;
-      o.dataset.builtin = t.is_builtin ? "1" : "";
       sel.appendChild(o);
     });
     sel.value = list.some((t) => t.id === prev) ? prev : (list[0] ? list[0].id : "");
     state.templateId = sel.value || null;
-    updateDeleteTemplateBtnState();
+    // Удалить можно и стандартный шаблон (см. TemplateStore.delete — редактировать его по-прежнему
+    // нельзя напрямую, только через копию, но удаление не защищено); единственное ограничение —
+    // последний оставшийся шаблон вообще, backend отдаёт для этого случая понятную ошибку.
+    $("deleteSelectedTemplateBtn").disabled = !state.templateId;
   } catch {}
-}
-
-// Стандартный шаблон не удаляется (см. TemplateStore.delete в backend) — вместо того чтобы
-// давать нажать и упереться в алерт с ошибкой, сразу выключаем кнопку.
-function updateDeleteTemplateBtnState() {
-  const opt = $("templateSelect").selectedOptions[0];
-  $("deleteSelectedTemplateBtn").disabled = !opt || opt.dataset.builtin === "1";
 }
 
 let draggedStepRow = null;   // текущий перетаскиваемый .step-row (один редактор шаблона зараз)
@@ -1364,7 +1359,7 @@ function bind() {
 
   $("templateSelect").onchange = () => {
     state.templateId = $("templateSelect").value || null;
-    updateDeleteTemplateBtnState();
+    $("deleteSelectedTemplateBtn").disabled = !state.templateId;
   };
   $("newTemplateBtn").onclick = () => openTemplateEditor(null);
   $("editTemplateBtn").onclick = () => {
