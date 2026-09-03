@@ -39,14 +39,18 @@ def _auto_time_start(protocol: Protocol) -> str | None:
     segs = _ordered_segments(protocol)
     if not segs:
         return None   # нечего вычислять — опрос ещё не записывался
-    return datetime.fromtimestamp(segs[0].created_at).strftime("%H:%M")
+    # С секундами, не только часы:минуты — короткая сессия (в т.ч. просто тестовый прогон)
+    # укладывается в одну и ту же минуту целиком, и начало с окончанием визуально совпадали бы,
+    # даже будучи технически разными (реальная жалоба пользователя). Для настоящего протокола
+    # секунды тоже не лишние — это только точнее.
+    return datetime.fromtimestamp(segs[0].created_at).strftime("%H:%M:%S")
 
 
 def _auto_time_end(protocol: Protocol) -> str | None:
     segs = _ordered_segments(protocol)
     if not segs:
         return None
-    return datetime.fromtimestamp(segs[-1].created_at).strftime("%H:%M")
+    return datetime.fromtimestamp(segs[-1].created_at).strftime("%H:%M:%S")
 
 
 def _auto_time_range(protocol: Protocol) -> str | None:

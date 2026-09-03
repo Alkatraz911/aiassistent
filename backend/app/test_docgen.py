@@ -174,12 +174,16 @@ def test_render_uses_profile_store_for_profile_source_steps() -> None:
 
 def test_render_computes_auto_date_and_time_fields() -> None:
     """Блок 6: source="auto" — дата и время начала/окончания опроса вычисляются из
-    Segment.created_at (wall-clock), а не спрашиваются в анкете (questionnaire пуст)."""
+    Segment.created_at (wall-clock), а не спрашиваются в анкете (questionnaire пуст).
+
+    Начало и конец — внутри ОДНОЙ И ТОЙ ЖЕ минуты (реальный случай: короткий тестовый прогон) —
+    формат обязан включать секунды, иначе оба выглядели бы одинаково («14:05») даже будучи
+    технически разными (реальная жалоба пользователя после фикса recording_started_at)."""
     from datetime import datetime
 
-    t0 = datetime(2026, 9, 1, 14, 5, 0).timestamp()
-    t1 = datetime(2026, 9, 1, 14, 5, 40).timestamp()
-    t2 = datetime(2026, 9, 1, 15, 32, 10).timestamp()
+    t0 = datetime(2026, 9, 1, 14, 5, 1).timestamp()
+    t1 = datetime(2026, 9, 1, 14, 5, 15).timestamp()
+    t2 = datetime(2026, 9, 1, 14, 5, 27).timestamp()
 
     steps = [
         TemplateStep(key="date", label="Дата", kind="field",
@@ -212,7 +216,7 @@ def test_render_computes_auto_date_and_time_fields() -> None:
         text = _doc_text(out_path)
         print(f"итоговый документ:\n{text}")
         assert "01.09.2026" in text
-        assert "14:05 - 15:32" in text
+        assert "14:05:01 - 14:05:27" in text
         assert MISSING_MARKER not in text
 
 
