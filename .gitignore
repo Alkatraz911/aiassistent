@@ -22,6 +22,9 @@ backend/storage/templates/
 # должность следователя и т.п.), локальный рантайм-файл, не для репозитория.
 backend/storage/operator_profile.json
 
+# Проекты/дела (Блок 7) — заводятся пользователем в рантайме, не исходный код.
+backend/storage/projects/
+
 # Модели ASR (кэш)
 backend/models/
 

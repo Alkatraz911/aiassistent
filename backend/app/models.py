@@ -137,6 +137,25 @@ class TemplateSummary(BaseModel):
     updated_at: float = 0.0
 
 
+class Project(BaseModel):
+    """Дело/проект (Блок 7) — папка, в которую пользователь складывает проведённые допросы.
+    Без проекта начать сессию нельзя: список допросов в клиенте строится по проектам, а не
+    плоским списком всех когда-либо сохранённых сессий."""
+    id: str = Field(default_factory=_id)
+    name: str
+    created_at: float = Field(default_factory=time.time)
+
+
+class SessionSummary(BaseModel):
+    """Одна строка списка «допросы этого проекта» (Блок 7) — без полной расшифровки/аудио,
+    только то, что нужно узнать нужную запись в списке."""
+    session_id: str
+    template_name: str = ""
+    display_name: str = ""    # ФИО опрашиваемого, по возможности (см. sessions_index.py)
+    date: str = ""            # DD.MM.YYYY, реальная дата допроса (см. docgen._auto_date)
+    created_at: float = 0.0
+
+
 class Protocol(BaseModel):
     """Полный протокол сессии."""
     session_id: str
@@ -146,6 +165,10 @@ class Protocol(BaseModel):
     # создаётся при старте анкеты, которая может идти долго ДО того, как реально нажали «Начать
     # запись» — `created_at` в это время был бы неверным якорем для времени допроса.
     recording_started_at: Optional[float] = None
+    # Проект (Блок 7), к которому относится этот допрос — задаётся один раз, при создании сессии
+    # (см. POST /api/session/init), до начала анкеты/записи. None — сессии, заведённые до Блока 7
+    # (обратная совместимость), в списки допросов проекта не попадают.
+    project_id: Optional[str] = None
     title: str = "Протокол опроса"
     questionnaire: list[QuestionnaireField] = Field(default_factory=list)
     segments: list[Segment] = Field(default_factory=list)

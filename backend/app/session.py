@@ -28,7 +28,7 @@ from .asr.base import ASRWord, dropped_note, hallucination_reason
 from .asr.local_agreement import UtteranceHypothesis
 from .asr.model_manager import ModelKey, ModelManager
 from .asr.scheduler import AsrJob, AsrScheduler, PRIORITY_FINAL, PRIORITY_ONESHOT, PRIORITY_PARTIAL
-from .assistant.questionnaire import AssistantSession
+from .assistant.questionnaire import AssistantSession, build_script
 from .audio.crosstalk import CrossTalkScorer
 from .audio.endpointer import Endpointer, EndpointEvent
 from .audio.rolling_buffer import RollingBuffer
@@ -705,6 +705,36 @@ class SessionManager:
 
     def get(self, session_id: str) -> Session | None:
         return self.sessions.get(session_id)
+
+    def get_or_load(self, session_id: str) -> Session | None:
+        """Как `get()`, но если сессии нет в памяти (типично — после перезапуска backend), а на
+        диске есть `protocol.json` (Блок 7: «открыть прошлый допрос повторно») — восстанавливает
+        `Session` из него. Без этого просмотр/повторная генерация .docx старого допроса работали
+        бы только пока backend ни разу не перезапускали с момента записи — то есть почти никогда
+        в реальном ежедневном использовании."""
+        s = self.sessions.get(session_id)
+        if s is not None:
+            return s
+        path = config.STORAGE_DIR / session_id / "protocol.json"
+        if not path.exists():
+            return None
+        try:
+            protocol = Protocol.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        s = Session(session_id, self.scheduler, self._active_key)
+        s.protocol = protocol
+        if protocol.template_snapshot is not None:
+            # Восстанавливаем состояние анкеты, СОГЛАСОВАННОЕ с уже загруженным protocol.
+            # questionnaire — иначе повторное «Сохранить» на реоткрытой сессии переписало бы его
+            # пустым (AssistantSession() по умолчанию — пустой сценарий, to_fields() тогда вернул
+            # бы []). Анкета считается пройденной целиком, а не «на середине».
+            s.assistant.load_script(build_script(protocol.template_snapshot.steps))
+            s.assistant.answers = {f.key: f.value for f in protocol.questionnaire}
+            s.assistant.idx = len(s.assistant.script)
+            s.assistant.finished = True
+        self.sessions[session_id] = s
+        return s
 
 
 manager = SessionManager()

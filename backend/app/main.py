@@ -32,8 +32,10 @@ from pydantic import BaseModel
 from . import config, device, telemetry
 from .assistant import docgen, templates as templates_store
 from .assistant import profile as profile_store
+from .assistant import projects as projects_store
 from .assistant.docx_import import normalize_docx, uncovered_placeholders
 from .assistant.questionnaire import build_script
+from .assistant.sessions_index import list_project_sessions
 from .models import Template, TemplateStep
 from .session import manager
 
@@ -341,12 +343,55 @@ def save_profile(req: ProfileSaveReq) -> dict[str, str]:
     return profile_store.store.update(req.values)
 
 
+# --- проекты/дела и история допросов (Блок 7) ------------------------------
+
+@app.get("/api/projects")
+def list_projects() -> list[dict]:
+    return [p.model_dump() for p in projects_store.store.list()]
+
+
+class ProjectCreateReq(BaseModel):
+    name: str
+
+
+@app.post("/api/projects")
+def create_project(req: ProjectCreateReq) -> dict:
+    name = req.name.strip()
+    if not name:
+        return JSONResponse({"error": "укажите название проекта"}, status_code=422)
+    return projects_store.store.create(name).model_dump()
+
+
+@app.get("/api/projects/{project_id}/sessions")
+def project_sessions(project_id: str) -> list[dict]:
+    if projects_store.store.get(project_id) is None:
+        return JSONResponse({"error": "проект не найден"}, status_code=404)
+    return [s.model_dump() for s in list_project_sessions(project_id)]
+
+
+class SessionInitReq(BaseModel):
+    session_id: str
+    project_id: str
+
+
+@app.post("/api/session/init")
+def session_init(req: SessionInitReq) -> dict:
+    """Создаёт (если ещё не существует) сессию и сразу привязывает её к проекту — до начала
+    анкеты/записи, чтобы допрос попал в список проекта независимо от того, с чего реально
+    начнётся работа (анкета или сразу запись)."""
+    if projects_store.store.get(req.project_id) is None:
+        return JSONResponse({"error": "проект не найден"}, status_code=404)
+    s = manager.get(req.session_id) or manager.create(req.session_id)
+    s.protocol.project_id = req.project_id
+    return {"ok": True}
+
+
 @app.post("/api/protocol/{session_id}/docx")
 def generate_protocol_docx(session_id: str):
     """Заполняет докс-шаблон, привязанный к пройденному шаблону анкеты сессии, и отдаёт готовый
     .docx на скачивание. Требует, чтобы сессия проходила анкету с шаблоном, у которого задан
     docx_filename (см. docgen.render)."""
-    s = manager.get(session_id)
+    s = manager.get_or_load(session_id)
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
     snapshot = s.protocol.template_snapshot
@@ -510,7 +555,9 @@ def save(req: SessionReq) -> dict:
 
 @app.get("/api/protocol/{session_id}")
 def get_protocol(session_id: str) -> dict:
-    s = manager.get(session_id)
+    # get_or_load, не get — открыть сохранённый допрос (Блок 7) должно работать и после
+    # перезапуска backend, когда сессии уже нет в памяти.
+    s = manager.get_or_load(session_id)
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
     return s.protocol.model_dump()
@@ -518,7 +565,7 @@ def get_protocol(session_id: str) -> dict:
 
 @app.get("/api/audio/{session_id}")
 def get_audio(session_id: str):
-    s = manager.get(session_id)
+    s = manager.get_or_load(session_id)
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
     path = s.build_mix()  # свести по-канальные WAV в моно-микс для плеера

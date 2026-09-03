@@ -22,6 +22,8 @@ TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 # assistant/profile.py. Отдельный файл, а не запись внутри storage/templates — это не анкета
 # конкретного шаблона, а данные заполняющего программу человека.
 OPERATOR_PROFILE_PATH = BASE_DIR / "storage" / "operator_profile.json"
+PROJECTS_DIR = BASE_DIR / "storage" / "projects"      # проекты/дела (Блок 7)
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Частота дискретизации, в которой работает весь пайплайн (Whisper ждёт 16 кГц).
 SAMPLE_RATE = 16_000
