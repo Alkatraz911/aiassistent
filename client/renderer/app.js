@@ -2,7 +2,9 @@
 
 const HTTP = window.APP.backendHttp;
 const WS = window.APP.backendWs;
-const SESSION = "sess-" + Date.now().toString(36);
+// let, не const: «открыть прошлый допрос» (Блок 7) переключает клиент на существующий
+// session_id вместо нового, сгенерированного при загрузке страницы.
+let SESSION = "sess-" + Date.now().toString(36);
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -15,6 +17,7 @@ const state = {
   flushed: true,            // false между отправкой "stop" и получением "stopped"
   templateId: null,         // выбранный шаблон анкеты (Блок 5)
   editingTemplateId: null,  // null = создаём новый, иначе редактируем существующий
+  projectId: null,          // выбранный проект/дело (Блок 7) — без него нельзя начать допрос
   // Импорт .docx-бланка (Блок 6): id/имя докс-файла черновика, которые нужно передать при
   // сохранении шаблона (POST /api/templates), иначе сохранённый шаблон получит другой id, и
   // уже нормализованный докс-файл на сервере останется ни на что не сославшимся.
@@ -364,11 +367,110 @@ function handleNext(r) {
 }
 
 async function startAssistant() {
+  if (!state.projectId) { alert("Сначала выберите или создайте проект (дело) — см. вверху панели."); return; }
   const step = await fetch(`${HTTP}/api/assistant/start`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
   }).then((x) => x.json());
   showStep(step);
+}
+
+// ---------- проекты/дела и история допросов (Блок 7) ----------
+async function loadProjects() {
+  try {
+    const list = await fetch(`${HTTP}/api/projects`).then((x) => x.json());
+    if (!Array.isArray(list) || !list.length) {
+      // Без проекта работать нельзя вовсе (реальное требование) — раз их ещё ни одного нет,
+      // сразу просим завести, а не показываем пустой список с ощущением, что чего-то не хватает.
+      await createProject();
+      return;
+    }
+    const sel = $("projectSelect");
+    const prev = sel.value;
+    sel.innerHTML = "";
+    list.forEach((p) => {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name;
+      sel.appendChild(o);
+    });
+    sel.value = list.some((p) => p.id === prev) ? prev : list[0].id;
+    state.projectId = sel.value || null;
+    await initSessionProject();
+  } catch {}
+}
+
+// Привязывает текущий SESSION к выбранному проекту на сервере — до начала анкеты/записи, чтобы
+// допрос попал в список проекта независимо от того, с чего реально начнётся работа.
+async function initSessionProject() {
+  if (!state.projectId) return;
+  try {
+    await fetch(`${HTTP}/api/session/init`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION, project_id: state.projectId }),
+    });
+  } catch {}
+}
+
+async function createProject() {
+  const name = (prompt("Название нового проекта (дела):") || "").trim();
+  if (!name) return;
+  const r = await fetch(`${HTTP}/api/projects`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || "Не удалось создать проект."); return; }
+  await loadProjects();
+  $("projectSelect").value = data.id;
+  state.projectId = data.id;
+  await initSessionProject();
+}
+
+// Список сохранённых допросов текущего проекта — клик по строке открывает допрос (Блок 7).
+async function openSessionsModal() {
+  if (!state.projectId) { alert("Сначала выберите проект."); return; }
+  const box = $("sessionsList");
+  box.innerHTML = '<p class="hint">Загрузка…</p>';
+  $("sessionsModal").hidden = false;
+  let list = [];
+  try {
+    list = await fetch(`${HTTP}/api/projects/${state.projectId}/sessions`).then((x) => x.json());
+  } catch {}
+  box.innerHTML = "";
+  if (!Array.isArray(list) || !list.length) {
+    box.innerHTML = '<p class="hint">В этом проекте пока нет сохранённых допросов.</p>';
+    return;
+  }
+  list.forEach((s) => {
+    const row = document.createElement("div");
+    row.className = "session-row";
+    const title = [s.template_name, s.display_name].filter(Boolean).join(" — ") || "Без названия";
+    row.innerHTML = `<span class="session-title">${escAttr(title)}</span>
+      <span class="session-date">${escAttr(s.date)}</span>`;
+    row.onclick = () => openPastSession(s.session_id);
+    box.appendChild(row);
+  });
+}
+
+// Открыть сохранённый допрос заново: транскрипт, поля анкеты, фонограмма — как если бы это была
+// текущая живая сессия (та же логика рендера, что и после /api/finalize).
+async function openPastSession(sessionId) {
+  if (state.recording) { alert("Сначала остановите текущую запись."); return; }
+  const r = await fetch(`${HTTP}/api/protocol/${sessionId}`);
+  const protocol = await r.json();
+  if (!r.ok) { alert(protocol.error || "Не удалось открыть допрос."); return; }
+  $("sessionsModal").hidden = true;
+  SESSION = sessionId;
+  renderProtocol(protocol);
+  renderFields(protocol.questionnaire || []);
+  if (protocol.template_id) {
+    state.templateId = protocol.template_id;
+    if ([...$("templateSelect").options].some((o) => o.value === protocol.template_id)) {
+      $("templateSelect").value = protocol.template_id;
+    }
+  }
+  await loadAudio();
 }
 
 // ---------- шаблоны анкеты (Блок 5) ----------
@@ -874,6 +976,7 @@ async function saveFieldEdit(key, td) {
 
 // ---------- Протокол: стриминг (Блок 2 — partial/stable/final) ----------
 function startRecording() {
+  if (!state.projectId) { alert("Сначала выберите или создайте проект (дело) — см. вверху панели."); return; }
   state.ws = new WebSocket(`${WS}/ws/stream/${SESSION}`);
   state.ws.binaryType = "arraybuffer";
   state.ws.onopen = async () => {
@@ -1357,6 +1460,14 @@ function bind() {
   $("profileCancel").onclick = () => ($("profileModal").hidden = true);
   $("profileSaveBtn").onclick = saveProfile;
 
+  $("projectSelect").onchange = async () => {
+    state.projectId = $("projectSelect").value || null;
+    await initSessionProject();
+  };
+  $("newProjectBtn").onclick = createProject;
+  $("pastSessionsBtn").onclick = openSessionsModal;
+  $("sessionsCancel").onclick = () => ($("sessionsModal").hidden = true);
+
   $("templateSelect").onchange = () => {
     state.templateId = $("templateSelect").value || null;
     $("deleteSelectedTemplateBtn").disabled = !state.templateId;
@@ -1388,3 +1499,4 @@ checkHealth();
 loadMics();
 loadModels();
 loadTemplates();
+loadProjects();

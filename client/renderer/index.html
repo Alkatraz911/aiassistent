@@ -33,6 +33,15 @@
   <main>
     <!-- Левая колонка: ассистент + анкета -->
     <section class="col left">
+      <label class="section-label" for="projectSelect">Проект (дело)</label>
+      <div class="template-row">
+        <select id="projectSelect"></select>
+        <button id="newProjectBtn" class="ghost">+ Новый проект</button>
+        <button id="pastSessionsBtn" class="ghost">📂 Допросы проекта</button>
+      </div>
+      <p class="hint">Без выбранного проекта нельзя начать анкету или запись — сохранённые
+        допросы группируются по проектам.</p>
+
       <h2>AI-ассистент · Анкета</h2>
       <label class="section-label" for="templateSelect">Тип мероприятия (шаблон протокола)</label>
       <div class="template-row">
@@ -122,6 +131,19 @@
       <div class="row">
         <button id="speakerCancel" class="ghost">Отмена</button>
         <button id="speakerApply">Применить ко всем репликам</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- модалка списка допросов проекта (Блок 7) -->
+  <div id="sessionsModal" class="modal" hidden>
+    <div class="modal-card modal-card-wide">
+      <h3>Допросы проекта</h3>
+      <p class="hint">Клик по строке открывает допрос — можно просмотреть транскрипт, поля
+        анкеты, прослушать фонограмму и заново сформировать .docx.</p>
+      <div id="sessionsList" class="sessions-list"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="sessionsCancel" class="ghost">Закрыть</button>
       </div>
     </div>
   </div>

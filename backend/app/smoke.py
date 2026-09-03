@@ -205,6 +205,42 @@ def test_recording_started_at_set_once() -> None:
     print("RECORDING_STARTED_AT_ONCE OK ✅")
 
 
+def test_get_or_load_restores_session_after_restart() -> None:
+    """Блок 7: «открыть прошлый допрос» должно работать и после перезапуска backend, когда
+    сессии уже нет в памяти (типичный случай в ежедневной работе — не после каждой записи сразу
+    смотрят готовый протокол). Симулируем перезапуск: сохраняем сессию на диск, убираем её из
+    `manager.sessions` (то, что при реальном перезапуске стало бы пустым), просим `get_or_load` —
+    должен восстановить и сам протокол, и состояние анкеты, СОГЛАСОВАННОЕ с сохранёнными
+    ответами (иначе повторное «Сохранить» переписало бы questionnaire пустым)."""
+    from .assistant.questionnaire import build_script
+    from .models import Template, TemplateStep
+
+    steps = [TemplateStep(key="fio", label="ФИО", kind="field", question="Ваше ФИО?")]
+
+    s = manager.create("smoke-get-or-load")
+    s.assistant.load_script(build_script(steps))
+    s.protocol.template_id = "t"
+    s.protocol.template_name = "Тест"
+    s.protocol.template_snapshot = Template(id="t", name="Тест", steps=steps)
+    s.assistant.start()
+    s.assistant.submit_answer("Иванов Иван Иванович")
+    s.save()   # пишет protocol.json — то самое состояние, что должно пережить "перезапуск"
+
+    del manager.sessions["smoke-get-or-load"]   # симуляция: backend перезапущен, память пуста
+    assert manager.get("smoke-get-or-load") is None, "get() не должен читать с диска"
+
+    restored = manager.get_or_load("smoke-get-or-load")
+    assert restored is not None, "get_or_load должен восстановить сессию из protocol.json"
+    assert restored.protocol.questionnaire[0].value == "Иванов Иван Иванович"
+
+    # Повторное «Сохранить» на восстановленной сессии не должно стереть questionnaire пустым.
+    restored.save()
+    reloaded = manager.get("smoke-get-or-load").protocol
+    assert reloaded.questionnaire and reloaded.questionnaire[0].value == "Иванов Иван Иванович", (
+        "повторный save() на восстановленной сессии не должен затирать ответы анкеты")
+    print("GET_OR_LOAD_RESTORES_SESSION OK ✅")
+
+
 def test_rename_speaker_after_diarization() -> None:
     """После диаризации общего микрофона в ОДНОМ канале лежат разные спикеры, поэтому
     переименование должно идти по метке голоса, а не по каналу.
@@ -351,6 +387,7 @@ def main() -> None:
     test_prompt_echo_filter()
     test_prompt_has_no_recent_speech()
     test_recording_started_at_set_once()
+    test_get_or_load_restores_session_after_restart()
     test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")

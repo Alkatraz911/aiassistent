@@ -157,6 +157,16 @@ td.v.filled { color: #1f7a45; }
 #templateQaPlaceholderHint.required { color: #a5374a; }
 
 .modal-card-wide { width: min(1320px, 94vw); max-height: 88vh; overflow-y: auto; }
+
+.sessions-list { display: flex; flex-direction: column; gap: 6px; margin: 12px 0; }
+.session-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid #dde3ee; border-radius: 8px; cursor: pointer;
+  background: #f7f9fc;
+}
+.session-row:hover { border-color: #3a5bd9; background: #eef3ff; }
+.session-title { font-weight: 500; }
+.session-date { color: #66718c; font-size: 12px; flex-shrink: 0; }
 /* Два текстовых поля шага (statement/question) кладём рядом, а не друг под другом — на широкой
    модалке одна длинная колонка текста выглядит так же тесно, как раньше выглядела вся модалка. */
 .step-row .step-texts { display: flex; gap: 10px; }
