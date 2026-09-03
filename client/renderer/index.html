@@ -116,6 +116,20 @@
     </section>
   </main>
 
+  <!-- модалка создания проекта (Блок 7) — не window.prompt(): в Electron он ненадёжен
+       (зависит от sandbox/contextIsolation) и молча ничего не показывает вместо ошибки. -->
+  <div id="newProjectModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>Новый проект</h3>
+      <input id="newProjectName" type="text" placeholder="Название проекта (дела)" />
+      <div class="row">
+        <button id="newProjectCancel" class="ghost">Отмена</button>
+        <button id="newProjectCreate">Создать</button>
+      </div>
+      <p class="hint" id="newProjectHint"></p>
+    </div>
+  </div>
+
   <!-- модалка переименования спикера -->
   <div id="speakerModal" class="modal" hidden>
     <div class="modal-card">

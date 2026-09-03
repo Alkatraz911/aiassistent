@@ -382,7 +382,7 @@ async function loadProjects() {
     if (!Array.isArray(list) || !list.length) {
       // Без проекта работать нельзя вовсе (реальное требование) — раз их ещё ни одного нет,
       // сразу просим завести, а не показываем пустой список с ощущением, что чего-то не хватает.
-      await createProject();
+      createProject();
       return;
     }
     const sel = $("projectSelect");
@@ -412,15 +412,27 @@ async function initSessionProject() {
   } catch {}
 }
 
-async function createProject() {
-  const name = (prompt("Название нового проекта (дела):") || "").trim();
-  if (!name) return;
+// window.prompt() здесь намеренно не используется — в Electron он ненадёжен (зависит от
+// sandbox/contextIsolation конкретной версии) и в части конфигураций молча возвращает null
+// вместо диалога, из-за чего кнопка выглядит нерабочей (реальная жалоба пользователя). Обычная
+// модалка, как и везде в этом приложении, гарантированно работает вне зависимости от Electron.
+function createProject() {
+  $("newProjectName").value = "";
+  $("newProjectHint").textContent = "";
+  $("newProjectModal").hidden = false;
+  $("newProjectName").focus();
+}
+
+async function submitNewProject() {
+  const name = $("newProjectName").value.trim();
+  if (!name) { $("newProjectHint").textContent = "Укажите название проекта."; return; }
   const r = await fetch(`${HTTP}/api/projects`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   const data = await r.json();
-  if (!r.ok) { alert(data.error || "Не удалось создать проект."); return; }
+  if (!r.ok) { $("newProjectHint").textContent = data.error || "Не удалось создать проект."; return; }
+  $("newProjectModal").hidden = true;
   await loadProjects();
   $("projectSelect").value = data.id;
   state.projectId = data.id;
@@ -1465,6 +1477,11 @@ function bind() {
     await initSessionProject();
   };
   $("newProjectBtn").onclick = createProject;
+  $("newProjectCancel").onclick = () => ($("newProjectModal").hidden = true);
+  $("newProjectCreate").onclick = submitNewProject;
+  $("newProjectName").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submitNewProject();
+  });
   $("pastSessionsBtn").onclick = openSessionsModal;
   $("sessionsCancel").onclick = () => ($("sessionsModal").hidden = true);
 
