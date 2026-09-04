@@ -1127,14 +1127,8 @@ function addSegment(seg) {
 
   if (seg.likely_bleed) {
     wrap.classList.add("segment-bleed");
-    const flag = document.createElement("span");
-    flag.className = "bleed-flag";
-    flag.title = "Похоже на протёкший голос другого канала (совпадает с репликой на другом " +
-      "канале примерно в то же время) — авто-решение не принято, проверьте вручную.";
-    flag.textContent = "⚠ вероятный дубль";
-    flag.onclick = (ev) => { ev.stopPropagation(); wrap.classList.toggle("collapsed"); };
     sp.appendChild(document.createElement("br"));
-    sp.appendChild(flag);
+    buildBleedControls(seg, wrap).forEach((el) => sp.appendChild(el));
   }
 
   const body = document.createElement("div");
@@ -1181,19 +1175,49 @@ function addSegment(seg) {
                                speaker: seg.speaker, words, meta });
 }
 
+// Флаг «вероятный дубль» + кнопка удаления (Блок 3.7) — общая для двух мест отрисовки
+// (изначальный рендер сегмента и досветка задним числом, когда дедупликация сработала позже).
+// Помечаются ОБЕ копии дубля (см. Session._maybe_mark_crosstalk_duplicate) — при близко
+// расположенных микрофонах система не может надёжно решить, кто реальный автор, так что решение
+// за оператором: удалить ту копию, которую произнёс не этот участник.
+function buildBleedControls(seg, wrap) {
+  const flag = document.createElement("span");
+  flag.className = "bleed-flag";
+  flag.title = "Похоже на протёкший голос другого канала (совпадает с репликой на другом " +
+    "канале примерно в то же время) — кто реальный автор, система не решает, проверьте вручную.";
+  flag.textContent = "⚠ вероятный дубль";
+  flag.onclick = (ev) => { ev.stopPropagation(); wrap.classList.toggle("collapsed"); };
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "bleed-delete";
+  delBtn.textContent = "✕ удалить";
+  delBtn.title = "Удалить эту реплику — если реально сказал не этот участник";
+  delBtn.onclick = (ev) => { ev.stopPropagation(); deleteSegment(seg.id); };
+
+  return [flag, delBtn];
+}
+
+async function deleteSegment(id) {
+  if (!confirm("Удалить эту реплику как дубль протёкшего голоса? Действие необратимо.")) return;
+  const r = await fetch(`${HTTP}/api/segment/delete`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION, segment_id: id }),
+  });
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || "Не удалось удалить реплику."); return; }
+  const s = state.segments.get(id);
+  if (s) { s.el.remove(); state.segments.delete(id); }
+}
+
 function applyBleedFlag(seg) {
   // Сегмент уже был отрисован раньше как обычный, но пост-ASR дедупликация (Блок 3.7) задним
   // числом распознала его как вероятный дубль протёкшего голоса — досвечиваем на месте.
   const s = state.segments.get(seg.id);
   if (!s || s.el.classList.contains("segment-bleed")) return;
   s.el.classList.add("segment-bleed");
-  const flag = document.createElement("span");
-  flag.className = "bleed-flag";
-  flag.title = "Похоже на протёкший голос другого канала — проверьте вручную.";
-  flag.textContent = "⚠ вероятный дубль";
-  flag.onclick = (ev) => { ev.stopPropagation(); s.el.classList.toggle("collapsed"); };
   s.speakerEl.appendChild(document.createElement("br"));
-  s.speakerEl.appendChild(flag);
+  buildBleedControls(seg, s.el).forEach((el) => s.speakerEl.appendChild(el));
 }
 
 async function saveEdit(id, txtEl, wrap) {

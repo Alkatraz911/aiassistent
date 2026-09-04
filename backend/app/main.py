@@ -516,6 +516,28 @@ def edit_segment(req: EditReq) -> dict:
     return {"ok": ok}
 
 
+class SegmentDeleteReq(BaseModel):
+    session_id: str
+    segment_id: str
+
+
+@app.post("/api/segment/delete")
+def delete_segment(req: SegmentDeleteReq) -> dict:
+    """Удалить реплику, помеченную вероятным дублем протёкшего голоса (Блок 3.7) — при близко
+    расположенных микрофонах автоматика не может надёжно решить, кто реальный автор, поэтому
+    помечает ОБЕ копии (см. Session._maybe_mark_crosstalk_duplicate), а лишнюю удаляет оператор."""
+    s = manager.get(req.session_id)
+    if not s:
+        return JSONResponse({"error": "no session"}, status_code=404)
+    try:
+        ok = s.delete_segment(req.segment_id)
+    except PermissionError as e:
+        return JSONResponse({"error": str(e)}, status_code=403)
+    if not ok:
+        return JSONResponse({"error": "сегмент не найден"}, status_code=404)
+    return {"ok": True}
+
+
 class FinalizeReq(BaseModel):
     session_id: str
     align: bool = True                 # уточнить тайм-коды (forced alignment)

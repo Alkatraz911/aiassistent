@@ -241,6 +241,53 @@ def test_get_or_load_restores_session_after_restart() -> None:
     print("GET_OR_LOAD_RESTORES_SESSION OK ✅")
 
 
+def test_crosstalk_dedup_marks_both_copies_not_just_weaker() -> None:
+    """Блок 3.7 (пересмотр): раньше по SNR решали, какая из двух копий «настоящая», и помечали
+    дублем только более слабую — при близко расположенных микрофонах SNR для этого ненадёжен
+    (реальный случай: система помечала дублем именно ту копию, которую человек произнёс на самом
+    деле, а протёкшую оставляла как настоящую). Теперь система вообще не решает, кто автор —
+    помечаются ОБЕ копии, независимо от того, у какой SNR выше."""
+    from .models import Segment, Word
+
+    s = manager.create("smoke-dedup-both")
+    words = [Word(text="слово", start=0.0, end=0.4)] * 5
+    seg_a = Segment(channel=0, speaker="Интервьюер", start=0.0, end=2.0,
+                     text="Где вы были вчера вечером?", own_snr_db=20.0, words=words)
+    # Явно ТИШЕ (own_snr_db=5 против 20) — по старой логике именно её пометили бы дублем,
+    # хотя в этом тесте не важно, кто реально автор: система теперь этого не решает вовсе.
+    seg_b = Segment(channel=1, speaker="Опрашиваемый", start=0.1, end=2.1,
+                     text="Где вы были вчера вечером?", own_snr_db=5.0, words=words)
+    s.protocol.segments = [seg_a]
+    s._maybe_mark_crosstalk_duplicate(seg_b)
+    assert seg_a.likely_bleed and seg_b.likely_bleed, "должны быть помечены ОБЕ копии, не одна"
+    print("CROSSTALK_DEDUP_MARKS_BOTH OK ✅")
+
+
+def test_delete_segment_only_allowed_for_bleed_marked() -> None:
+    """Удаление реплики (Блок 3.7: кнопка «✕ удалить» у дублей) — не общий способ стирать
+    транскрипт: разрешено только для реплик, уже помеченных вероятным дублем, иначе кнопка
+    превратилась бы в способ незаметно вычистить настоящие показания без следа."""
+    from .models import Segment
+
+    s = manager.create("smoke-delete-segment")
+    real = Segment(channel=0, text="настоящая реплика")
+    dup = Segment(channel=1, text="дубль", likely_bleed=True)
+    s.protocol.segments = [real, dup]
+
+    raised = False
+    try:
+        s.delete_segment(real.id)
+    except PermissionError:
+        raised = True
+    assert raised, "нельзя удалить реплику, не помеченную дублем"
+    assert len(s.protocol.segments) == 2, "неудачная попытка не должна ничего менять"
+
+    assert s.delete_segment(dup.id) is True
+    assert len(s.protocol.segments) == 1
+    assert s.delete_segment("nonexistent") is False
+    print("DELETE_SEGMENT_PERMISSION OK ✅")
+
+
 def test_rename_speaker_after_diarization() -> None:
     """После диаризации общего микрофона в ОДНОМ канале лежат разные спикеры, поэтому
     переименование должно идти по метке голоса, а не по каналу.
@@ -388,6 +435,8 @@ def main() -> None:
     test_prompt_has_no_recent_speech()
     test_recording_started_at_set_once()
     test_get_or_load_restores_session_after_restart()
+    test_crosstalk_dedup_marks_both_copies_not_just_weaker()
+    test_delete_segment_only_allowed_for_bleed_marked()
     test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")
