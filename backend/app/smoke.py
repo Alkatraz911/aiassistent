@@ -337,6 +337,35 @@ def test_delete_segment_unflags_remaining_partner() -> None:
     print("DELETE_SEGMENT_UNFLAGS_PARTNER OK ✅")
 
 
+def test_clear_bleed_flag_without_deleting() -> None:
+    """«✓ не дубль» (Блок 3.7) — снимает пометку, не удаляя реплику. Два сценария: (1) у обеих
+    копий ещё жив партнёр — снимается с обеих сразу, раз пара ложная целиком; (2) партнёр уже
+    отсутствует (реальный случай — старая сессия, где его удалили ДО того, как delete_segment
+    научился чистить пару автоматически, флаг остался сиротой) — снимается только с самой себя,
+    без ошибки."""
+    from .models import Segment
+
+    s = manager.create("smoke-clear-bleed-flag")
+    a = Segment(channel=0, text="Кто тут?", likely_bleed=True, bleed_hint="likely_original")
+    b = Segment(channel=1, text="Кто тут?", likely_bleed=True, bleed_hint="likely_leak")
+    a.bleed_pair_id, b.bleed_pair_id = b.id, a.id
+    orphan = Segment(channel=0, text="Осиротевший дубль", likely_bleed=True,
+                      bleed_hint="likely_leak")   # bleed_pair_id пуст — партнёра уже нет
+    s.protocol.segments = [a, b, orphan]
+
+    result = s.clear_bleed_flag(a.id)
+    assert result == {"partner": b.to_ws_dict()}
+    assert not a.likely_bleed and not a.bleed_pair_id
+    assert not b.likely_bleed and not b.bleed_pair_id, "пара ложная целиком — снимается с обеих"
+
+    result2 = s.clear_bleed_flag(orphan.id)
+    assert result2 == {"partner": None}, "без партнёра снимать не с кого, но и не ошибка"
+    assert not orphan.likely_bleed
+
+    assert s.clear_bleed_flag("nonexistent") is None
+    print("CLEAR_BLEED_FLAG OK ✅")
+
+
 def test_rename_speaker_after_diarization() -> None:
     """После диаризации общего микрофона в ОДНОМ канале лежат разные спикеры, поэтому
     переименование должно идти по метке голоса, а не по каналу.
@@ -488,6 +517,7 @@ def main() -> None:
     test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close()
     test_delete_segment_only_allowed_for_bleed_marked()
     test_delete_segment_unflags_remaining_partner()
+    test_clear_bleed_flag_without_deleting()
     test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")

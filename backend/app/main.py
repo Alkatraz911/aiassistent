@@ -541,6 +541,20 @@ def delete_segment(req: SegmentDeleteReq) -> dict:
     return {"ok": True, "partner": result["partner"]}
 
 
+@app.post("/api/segment/unflag")
+def unflag_segment(req: SegmentDeleteReq) -> dict:
+    """Снять пометку «вероятный дубль», не удаляя реплику (Блок 3.7) — для ложных совпадений
+    или для уже сохранённых сессий, где партнёра удалили ДО того, как delete_segment научился
+    чистить пару автоматически, и флаг остался висеть сиротой."""
+    s = manager.get(req.session_id)
+    if not s:
+        return JSONResponse({"error": "no session"}, status_code=404)
+    result = s.clear_bleed_flag(req.segment_id)
+    if result is None:
+        return JSONResponse({"error": "сегмент не найден"}, status_code=404)
+    return {"ok": True, "partner": result["partner"]}
+
+
 class FinalizeReq(BaseModel):
     session_id: str
     align: bool = True                 # уточнить тайм-коды (forced alignment)

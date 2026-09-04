@@ -526,6 +526,23 @@ class Session:
             # с актуальными полями.
             self._publish({"type": "segment_update", **other.to_ws_dict()})
 
+    def _clear_bleed_partner_locked(self, seg: Segment) -> dict | None:
+        """Вызывать под `self._lock`. Если у `seg` есть ещё живой партнёр по паре
+        (`bleed_pair_id`) — снимает пометку и с него: без второй копии сравнивать больше не с
+        чем. Возвращает представление партнёра для ответа клиенту, либо `None`."""
+        if not seg.bleed_pair_id:
+            return None
+        for other in self.protocol.segments:
+            if other.id == seg.bleed_pair_id:
+                other.likely_bleed = False
+                other.bleed_score = 0.0
+                other.bleed_hint = ""
+                other.bleed_pair_id = None
+                partner_dict = other.to_ws_dict()
+                self._publish({"type": "segment_update", **partner_dict})
+                return partner_dict
+        return None
+
     def delete_segment(self, seg_id: str) -> dict | None:
         """Удаляет сегмент — ТОЛЬКО помеченный вероятным дублем протёкшего голоса (Блок 3.7).
         Не общая функция удаления реплик: в этом приложении текст иначе никогда не стирается
@@ -535,12 +552,12 @@ class Session:
         `PermissionError`, если сегмент не помечен дублем — иначе кнопка в клиенте превратилась
         бы в способ незаметно вычистить любую настоящую реплику из протокола.
 
-        Если у удалённого сегмента была пара (`bleed_pair_id`) — снимает пометку с неё: без
-        партнёра сравнивать больше не с чем, оставшаяся реплика уже не дубль (реальный случай:
-        удалили одну копию, а вторая осталась висеть с флажком и кнопкой удаления). Возвращает
-        `{"partner": dict | None}` — партнёра нужно вернуть В ОТВЕТЕ, а не только толкнуть через
-        WS: кнопка удаления в клиенте нужна именно при разборе уже ЗАВЕРШЁННОЙ сессии, когда
-        live-соединения обычно уже нет и `_publish` никуда не доходит."""
+        Если у удалённого сегмента была пара (`bleed_pair_id`) — снимает пометку с неё (см.
+        `_clear_bleed_partner_locked`): без партнёра сравнивать больше не с чем, оставшаяся
+        реплика уже не дубль. Возвращает `{"partner": dict | None}` — партнёра нужно вернуть В
+        ОТВЕТЕ, а не только толкнуть через WS: кнопка удаления в клиенте нужна именно при разборе
+        уже ЗАВЕРШЁННОЙ сессии, когда live-соединения обычно уже нет и `_publish` никуда не
+        доходит."""
         with self._lock:
             for i, seg in enumerate(self.protocol.segments):
                 if seg.id == seg_id:
@@ -548,18 +565,27 @@ class Session:
                         raise PermissionError(
                             "удалить можно только реплику, помеченную вероятным дублем")
                     del self.protocol.segments[i]
-                    partner_dict = None
-                    if seg.bleed_pair_id:
-                        for other in self.protocol.segments:
-                            if other.id == seg.bleed_pair_id:
-                                other.likely_bleed = False
-                                other.bleed_score = 0.0
-                                other.bleed_hint = ""
-                                other.bleed_pair_id = None
-                                partner_dict = other.to_ws_dict()
-                                self._publish({"type": "segment_update", **partner_dict})
-                                break
-                    return {"partner": partner_dict}
+                    return {"partner": self._clear_bleed_partner_locked(seg)}
+            return None
+
+    def clear_bleed_flag(self, seg_id: str) -> dict | None:
+        """Снимает пометку «вероятный дубль» с реплики, НЕ удаляя её (Блок 3.7) — для случаев,
+        когда оператор считает совпадение случайным (оба участника правда сказали одно и то же),
+        или когда партнёр по паре уже был удалён РАНЕЕ, до того как `delete_segment` научился
+        чистить пару автоматически, и флаг остался висеть сиротой (реальный случай, воспроизведён
+        пользователем: после обновления старая, уже сохранённая сессия так и осталась с чужим
+        флагом — прошлые данные задним числом сами себя не чинят). Если у сегмента есть ещё
+        живой партнёр — снимает пометку и с него: раз пара ложная, ложная целиком. Возвращает
+        `None`, если сегмент не найден, иначе `{"partner": dict | None}`."""
+        with self._lock:
+            for seg in self.protocol.segments:
+                if seg.id == seg_id:
+                    partner = self._clear_bleed_partner_locked(seg)
+                    seg.likely_bleed = False
+                    seg.bleed_score = 0.0
+                    seg.bleed_hint = ""
+                    seg.bleed_pair_id = None
+                    return {"partner": partner}
             return None
 
     # --- правки ----------------------------------------------------------

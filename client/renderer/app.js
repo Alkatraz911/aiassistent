@@ -1202,7 +1202,29 @@ function buildBleedControls(seg, wrap) {
   delBtn.title = "Удалить эту реплику — если реально сказал не этот участник";
   delBtn.onclick = (ev) => { ev.stopPropagation(); deleteSegment(seg.id); };
 
-  return [flag, delBtn];
+  // Не удаляет, только снимает пометку — на случай ложного совпадения, а также для уже
+  // сохранённых сессий, где партнёр по паре был удалён ДО того, как это стало чистить пару
+  // автоматически, и флаг остался висеть сиротой (реальный случай — старые данные задним
+  // числом сами себя не чинят).
+  const unflagBtn = document.createElement("button");
+  unflagBtn.type = "button";
+  unflagBtn.className = "bleed-unflag";
+  unflagBtn.textContent = "✓ не дубль";
+  unflagBtn.title = "Снять пометку, не удаляя реплику — например, если совпадение случайное";
+  unflagBtn.onclick = (ev) => { ev.stopPropagation(); unflagSegment(seg.id); };
+
+  return [flag, delBtn, unflagBtn];
+}
+
+async function unflagSegment(id) {
+  const r = await fetch(`${HTTP}/api/segment/unflag`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION, segment_id: id }),
+  });
+  const data = await r.json();
+  if (!r.ok) { alert(data.error || "Не удалось снять пометку."); return; }
+  unflagBleedSegment({ id });
+  if (data.partner) unflagBleedSegment(data.partner);
 }
 
 async function deleteSegment(id) {
