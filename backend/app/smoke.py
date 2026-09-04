@@ -242,10 +242,10 @@ def test_get_or_load_restores_session_after_restart() -> None:
 
 
 def test_crosstalk_dedup_prefers_asr_confidence_over_snr() -> None:
-    """Блок 3.7 (пересмотр): раньше кто из двух копий «настоящая» решал только SNR — при близко
-    расположенных микрофонах он ненадёжен (реальный случай: система помечала дублем именно ту
-    копию, которую человек произнёс на самом деле, потому что её own_snr_db случайно оказался
-    ниже). Теперь при заметном разрыве уверенности ASR (word.prob) решает ОНА: протёкший/
+    """Блок 3.7 (пересмотр дважды): при близких микрофонах система не может надёжно решить, кто
+    реальный автор — помечаются ОБЕ копии дубля одинаково (`likely_bleed`), а не одна. Уверенность
+    ASR (word.prob) и SNR не выбрасываются, а становятся подсказкой `bleed_hint` — ориентиром для
+    оператора, не решением. При заметном разрыве уверенности подсказку определяет она: протёкший/
     искажённый звук ASR обычно распознаёт менее уверенно, даже когда SNR вводит в заблуждение."""
     from .models import Segment, Word
 
@@ -255,20 +255,22 @@ def test_crosstalk_dedup_prefers_asr_confidence_over_snr() -> None:
 
     seg_a = Segment(channel=0, speaker="Интервьюер", start=0.0, end=2.0,
                      text="Где вы были вчера вечером?", own_snr_db=5.0, words=confident)
-    # Ниже SNR, чем у seg_a, — по старому (SNR-only) критерию дублем пометили бы именно её,
-    # хотя распознана она увереннее (реальный автор), а seg_a — тише, но неувереннее (протечка).
+    # Ниже SNR, чем у seg_a, — по старому (SNR-only) критерию подсказка указала бы на неё же,
+    # хотя распознана она увереннее (похоже на реальный источник), а seg_a — тише, но неувереннее.
     seg_b = Segment(channel=1, speaker="Опрашиваемый", start=0.1, end=2.1,
                      text="Где вы были вчера вечером?", own_snr_db=20.0, words=unsure)
     s.protocol.segments = [seg_a]
     s._maybe_mark_crosstalk_duplicate(seg_b)
-    assert seg_b.likely_bleed and not seg_a.likely_bleed, (
-        "уверенность ASR должна была перевесить SNR при заметном разрыве")
+    assert seg_a.likely_bleed and seg_b.likely_bleed, "должны быть помечены ОБЕ копии"
+    assert seg_b.bleed_hint == "likely_leak" and seg_a.bleed_hint == "likely_original", (
+        "уверенность ASR должна была перевесить SNR в подсказке при заметном разрыве")
     print("CROSSTALK_DEDUP_PREFERS_CONFIDENCE OK ✅")
 
 
 def test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close() -> None:
     """Когда уверенность ASR у обеих копий практически одинаковая (разрыв меньше
-    CROSSTALK_DEDUPE_CONFIDENCE_GAP), решение остаётся за SNR — как и было исходно."""
+    CROSSTALK_DEDUPE_CONFIDENCE_GAP), подсказка (не решение — обе копии всё равно помечены и
+    удаляемы) остаётся за SNR, как и было исходно."""
     from .models import Segment, Word
 
     s = manager.create("smoke-dedup-snr-fallback")
@@ -279,9 +281,9 @@ def test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close() -> None:
                      text="Где вы были вчера вечером?", own_snr_db=5.0, words=words)
     s.protocol.segments = [seg_a]
     s._maybe_mark_crosstalk_duplicate(seg_b)
-    assert seg_b.likely_bleed and not seg_a.likely_bleed, (
-        "при равной уверенности дублем должна быть помечена копия с более низким SNR"
-    )
+    assert seg_a.likely_bleed and seg_b.likely_bleed, "должны быть помечены ОБЕ копии"
+    assert seg_b.bleed_hint == "likely_leak" and seg_a.bleed_hint == "likely_original", (
+        "при равной уверенности подсказка должна указывать на копию с более низким SNR")
     print("CROSSTALK_DEDUP_SNR_FALLBACK OK ✅")
 
 

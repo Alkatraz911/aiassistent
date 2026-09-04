@@ -1180,12 +1180,19 @@ function addSegment(seg) {
 // Помечаются ОБЕ копии дубля (см. Session._maybe_mark_crosstalk_duplicate) — при близко
 // расположенных микрофонах система не может надёжно решить, кто реальный автор, так что решение
 // за оператором: удалить ту копию, которую произнёс не этот участник.
+// bleed_hint — ОРИЕНТИР по уверенности ASR/SNR (Session._maybe_mark_crosstalk_duplicate), не
+// решение: обе копии дубля помечаются и удаляемы одинаково, подсказка только различает текст.
+const BLEED_HINT_LABEL = {
+  likely_leak: "⚠ вероятный дубль — похоже, протечка",
+  likely_original: "⚠ вероятный дубль — возможно, оригинал",
+};
+
 function buildBleedControls(seg, wrap) {
   const flag = document.createElement("span");
   flag.className = "bleed-flag";
   flag.title = "Похоже на протёкший голос другого канала (совпадает с репликой на другом " +
     "канале примерно в то же время) — кто реальный автор, система не решает, проверьте вручную.";
-  flag.textContent = "⚠ вероятный дубль";
+  flag.textContent = BLEED_HINT_LABEL[seg.bleed_hint] || "⚠ вероятный дубль";
   flag.onclick = (ev) => { ev.stopPropagation(); wrap.classList.toggle("collapsed"); };
 
   const delBtn = document.createElement("button");

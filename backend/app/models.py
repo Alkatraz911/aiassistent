@@ -57,11 +57,15 @@ class Segment(BaseModel):
     # для отображения с точностью до минуты этого достаточно.
     created_at: float = Field(default_factory=time.time)
     # Кросс-ток (Блок 3.7): средний own-SNR канала за время реплики (для пост-ASR сравнения),
-    # и пометка «вероятный дубль протёкшего голоса» — НЕ удаляется, только приглушается в UI,
-    # решение остаётся за оператором (тот же принцип, что и audit-слой `Edit`).
+    # и пометка «вероятный дубль протёкшего голоса» — при близких микрофонах система не может
+    # надёжно решить, кто реальный автор, поэтому помечаются ОБЕ копии дубля одинаково; удаление —
+    # ручное действие оператора (см. Session.delete_segment), сама пометка ничего не стирает.
     own_snr_db: float = 0.0
     likely_bleed: bool = False
     bleed_score: float = 0.0
+    # Ориентир для оператора (не решение!): по уверенности ASR/SNR какая из двух копий пары
+    # больше похожа на протёкший звук. "" — bleed не обнаружен вовсе.
+    bleed_hint: Literal["", "likely_leak", "likely_original"] = ""
 
     def to_ws_dict(self) -> dict:
         """Представление сегмента для WS-сообщений `segment`/`asr_final` — единая точка,
@@ -70,6 +74,7 @@ class Segment(BaseModel):
             "id": self.id, "channel": self.channel, "speaker": self.speaker,
             "speaker_auto": self.speaker_auto, "start": self.start, "end": self.end,
             "text": self.text, "likely_bleed": self.likely_bleed, "bleed_score": self.bleed_score,
+            "bleed_hint": self.bleed_hint,
             "words": [{"text": w.text, "start": w.start, "end": w.end} for w in self.words],
         }
 
