@@ -1215,6 +1215,17 @@ async function deleteSegment(id) {
   if (!r.ok) { alert(data.error || "Не удалось удалить реплику."); return; }
   const s = state.segments.get(id);
   if (s) { s.el.remove(); state.segments.delete(id); }
+  // Партнёр по паре (если был) больше не дубль — сравнивать не с кем, вторую копию только что
+  // удалили. Обновляем его на месте по ответу запроса, а не ждём WS: обычно к этому моменту
+  // live-соединения уже нет (разбор дублей — сценарий уже завершённой сессии).
+  if (data.partner) unflagBleedSegment(data.partner);
+}
+
+function unflagBleedSegment(seg) {
+  const s = state.segments.get(seg.id);
+  if (!s) return;
+  s.el.classList.remove("segment-bleed", "collapsed");
+  s.speakerEl.querySelectorAll("br, .bleed-flag, .bleed-delete").forEach((el) => el.remove());
 }
 
 function applyBleedFlag(seg) {

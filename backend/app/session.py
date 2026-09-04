@@ -516,6 +516,8 @@ class Session:
             new_seg.bleed_score = round(similarity, 3)
             other.likely_bleed = True
             other.bleed_score = round(similarity, 3)
+            new_seg.bleed_pair_id = other.id
+            other.bleed_pair_id = new_seg.id
             weaker.bleed_hint = "likely_leak"
             stronger.bleed_hint = "likely_original"
             # `other` уже был отправлен клиенту раньше как обычный — досылаем обновление, иначе
@@ -524,14 +526,21 @@ class Session:
             # с актуальными полями.
             self._publish({"type": "segment_update", **other.to_ws_dict()})
 
-    def delete_segment(self, seg_id: str) -> bool:
+    def delete_segment(self, seg_id: str) -> dict | None:
         """Удаляет сегмент — ТОЛЬКО помеченный вероятным дублем протёкшего голоса (Блок 3.7).
         Не общая функция удаления реплик: в этом приложении текст иначе никогда не стирается
         молча, только правится поверх с аудитом (см. `edit_segment`/`Edit`) — здесь же речь о
         конкретном инструменте разбора дублей, когда у одной и той же фразы есть заведомо лишняя
-        копия на другом канале. Возвращает `False`, если сегмент не найден. Поднимает
+        копия на другом канале. Возвращает `None`, если сегмент не найден. Поднимает
         `PermissionError`, если сегмент не помечен дублем — иначе кнопка в клиенте превратилась
-        бы в способ незаметно вычистить любую настоящую реплику из протокола."""
+        бы в способ незаметно вычистить любую настоящую реплику из протокола.
+
+        Если у удалённого сегмента была пара (`bleed_pair_id`) — снимает пометку с неё: без
+        партнёра сравнивать больше не с чем, оставшаяся реплика уже не дубль (реальный случай:
+        удалили одну копию, а вторая осталась висеть с флажком и кнопкой удаления). Возвращает
+        `{"partner": dict | None}` — партнёра нужно вернуть В ОТВЕТЕ, а не только толкнуть через
+        WS: кнопка удаления в клиенте нужна именно при разборе уже ЗАВЕРШЁННОЙ сессии, когда
+        live-соединения обычно уже нет и `_publish` никуда не доходит."""
         with self._lock:
             for i, seg in enumerate(self.protocol.segments):
                 if seg.id == seg_id:
@@ -539,8 +548,19 @@ class Session:
                         raise PermissionError(
                             "удалить можно только реплику, помеченную вероятным дублем")
                     del self.protocol.segments[i]
-                    return True
-            return False
+                    partner_dict = None
+                    if seg.bleed_pair_id:
+                        for other in self.protocol.segments:
+                            if other.id == seg.bleed_pair_id:
+                                other.likely_bleed = False
+                                other.bleed_score = 0.0
+                                other.bleed_hint = ""
+                                other.bleed_pair_id = None
+                                partner_dict = other.to_ws_dict()
+                                self._publish({"type": "segment_update", **partner_dict})
+                                break
+                    return {"partner": partner_dict}
+            return None
 
     # --- правки ----------------------------------------------------------
     def edit_segment(self, seg_id: str, new_text: str) -> bool:

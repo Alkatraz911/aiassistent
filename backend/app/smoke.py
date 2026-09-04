@@ -306,10 +306,35 @@ def test_delete_segment_only_allowed_for_bleed_marked() -> None:
     assert raised, "нельзя удалить реплику, не помеченную дублем"
     assert len(s.protocol.segments) == 2, "неудачная попытка не должна ничего менять"
 
-    assert s.delete_segment(dup.id) is True
+    result = s.delete_segment(dup.id)
+    assert result == {"partner": None}, "дубль без bleed_pair_id — партнёра снимать не с кого"
     assert len(s.protocol.segments) == 1
-    assert s.delete_segment("nonexistent") is False
+    assert s.delete_segment("nonexistent") is None
     print("DELETE_SEGMENT_PERMISSION OK ✅")
+
+
+def test_delete_segment_unflags_remaining_partner() -> None:
+    """Реальный случай: пользователь удалил одну копию дубля, а вторая осталась висеть с
+    флажком «вероятный дубль» и кнопкой удаления — хотя сравнивать её уже не с чем, это больше
+    не дубль. Удаление должно снимать пометку с партнёра по `bleed_pair_id`."""
+    from .models import Segment
+
+    s = manager.create("smoke-delete-unflag-partner")
+    a = Segment(channel=0, text="Где вы были вчера вечером?", likely_bleed=True,
+                bleed_score=0.9, bleed_hint="likely_original")
+    b = Segment(channel=1, text="Где вы были вчера вечером?", likely_bleed=True,
+                bleed_score=0.9, bleed_hint="likely_leak")
+    a.bleed_pair_id, b.bleed_pair_id = b.id, a.id
+    s.protocol.segments = [a, b]
+
+    result = s.delete_segment(b.id)   # удаляем протёкшую копию
+    assert result is not None and result["partner"] is not None
+    assert result["partner"]["id"] == a.id
+    assert len(s.protocol.segments) == 1
+    remaining = s.protocol.segments[0]
+    assert not remaining.likely_bleed and remaining.bleed_hint == "" and not remaining.bleed_pair_id, (
+        "у оставшейся реплики должна быть полностью снята пометка дубля")
+    print("DELETE_SEGMENT_UNFLAGS_PARTNER OK ✅")
 
 
 def test_rename_speaker_after_diarization() -> None:
@@ -462,6 +487,7 @@ def main() -> None:
     test_crosstalk_dedup_prefers_asr_confidence_over_snr()
     test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close()
     test_delete_segment_only_allowed_for_bleed_marked()
+    test_delete_segment_unflags_remaining_partner()
     test_rename_speaker_after_diarization()
 
     print("\n--- сброс cross-talk состояния между заходами записи ---")

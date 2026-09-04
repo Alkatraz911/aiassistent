@@ -530,12 +530,15 @@ def delete_segment(req: SegmentDeleteReq) -> dict:
     if not s:
         return JSONResponse({"error": "no session"}, status_code=404)
     try:
-        ok = s.delete_segment(req.segment_id)
+        result = s.delete_segment(req.segment_id)
     except PermissionError as e:
         return JSONResponse({"error": str(e)}, status_code=403)
-    if not ok:
+    if result is None:
         return JSONResponse({"error": "сегмент не найден"}, status_code=404)
-    return {"ok": True}
+    # partner — сегмент, с которого автоматически снята пометка дубля (если она была): без
+    # партнёра сравнивать больше не с чем, второй копии в паре уже нет. Клиент обновляет его на
+    # месте по этому полю ответа — WS-обновление могло никуда не дойти (см. delete_segment).
+    return {"ok": True, "partner": result["partner"]}
 
 
 class FinalizeReq(BaseModel):

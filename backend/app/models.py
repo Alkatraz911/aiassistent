@@ -66,6 +66,11 @@ class Segment(BaseModel):
     # Ориентир для оператора (не решение!): по уверенности ASR/SNR какая из двух копий пары
     # больше похожа на протёкший звук. "" — bleed не обнаружен вовсе.
     bleed_hint: Literal["", "likely_leak", "likely_original"] = ""
+    # id парного сегмента дубля (см. Session._maybe_mark_crosstalk_duplicate) — нужен, чтобы при
+    # удалении одной копии (Session.delete_segment) снять пометку со второй: без партнёра
+    # сравнивать больше не с чем, и оставшаяся реплика — уже не дубль (реальный случай:
+    # пользователь удалил одну копию, а вторая осталась висеть с флажком и кнопкой удаления).
+    bleed_pair_id: Optional[str] = None
 
     def to_ws_dict(self) -> dict:
         """Представление сегмента для WS-сообщений `segment`/`asr_final` — единая точка,
@@ -74,7 +79,7 @@ class Segment(BaseModel):
             "id": self.id, "channel": self.channel, "speaker": self.speaker,
             "speaker_auto": self.speaker_auto, "start": self.start, "end": self.end,
             "text": self.text, "likely_bleed": self.likely_bleed, "bleed_score": self.bleed_score,
-            "bleed_hint": self.bleed_hint,
+            "bleed_hint": self.bleed_hint, "bleed_pair_id": self.bleed_pair_id,
             "words": [{"text": w.text, "start": w.start, "end": w.end} for w in self.words],
         }
 
