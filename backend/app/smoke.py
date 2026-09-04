@@ -241,26 +241,48 @@ def test_get_or_load_restores_session_after_restart() -> None:
     print("GET_OR_LOAD_RESTORES_SESSION OK ✅")
 
 
-def test_crosstalk_dedup_marks_both_copies_not_just_weaker() -> None:
-    """Блок 3.7 (пересмотр): раньше по SNR решали, какая из двух копий «настоящая», и помечали
-    дублем только более слабую — при близко расположенных микрофонах SNR для этого ненадёжен
-    (реальный случай: система помечала дублем именно ту копию, которую человек произнёс на самом
-    деле, а протёкшую оставляла как настоящую). Теперь система вообще не решает, кто автор —
-    помечаются ОБЕ копии, независимо от того, у какой SNR выше."""
+def test_crosstalk_dedup_prefers_asr_confidence_over_snr() -> None:
+    """Блок 3.7 (пересмотр): раньше кто из двух копий «настоящая» решал только SNR — при близко
+    расположенных микрофонах он ненадёжен (реальный случай: система помечала дублем именно ту
+    копию, которую человек произнёс на самом деле, потому что её own_snr_db случайно оказался
+    ниже). Теперь при заметном разрыве уверенности ASR (word.prob) решает ОНА: протёкший/
+    искажённый звук ASR обычно распознаёт менее уверенно, даже когда SNR вводит в заблуждение."""
     from .models import Segment, Word
 
-    s = manager.create("smoke-dedup-both")
-    words = [Word(text="слово", start=0.0, end=0.4)] * 5
+    s = manager.create("smoke-dedup-confidence")
+    confident = [Word(text="слово", start=0.0, end=0.4, prob=0.95)] * 5
+    unsure = [Word(text="слово", start=0.0, end=0.4, prob=0.4)] * 5   # искажённый протёкший звук
+
+    seg_a = Segment(channel=0, speaker="Интервьюер", start=0.0, end=2.0,
+                     text="Где вы были вчера вечером?", own_snr_db=5.0, words=confident)
+    # Ниже SNR, чем у seg_a, — по старому (SNR-only) критерию дублем пометили бы именно её,
+    # хотя распознана она увереннее (реальный автор), а seg_a — тише, но неувереннее (протечка).
+    seg_b = Segment(channel=1, speaker="Опрашиваемый", start=0.1, end=2.1,
+                     text="Где вы были вчера вечером?", own_snr_db=20.0, words=unsure)
+    s.protocol.segments = [seg_a]
+    s._maybe_mark_crosstalk_duplicate(seg_b)
+    assert seg_b.likely_bleed and not seg_a.likely_bleed, (
+        "уверенность ASR должна была перевесить SNR при заметном разрыве")
+    print("CROSSTALK_DEDUP_PREFERS_CONFIDENCE OK ✅")
+
+
+def test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close() -> None:
+    """Когда уверенность ASR у обеих копий практически одинаковая (разрыв меньше
+    CROSSTALK_DEDUPE_CONFIDENCE_GAP), решение остаётся за SNR — как и было исходно."""
+    from .models import Segment, Word
+
+    s = manager.create("smoke-dedup-snr-fallback")
+    words = [Word(text="слово", start=0.0, end=0.4, prob=0.9)] * 5   # одинаковая уверенность
     seg_a = Segment(channel=0, speaker="Интервьюер", start=0.0, end=2.0,
                      text="Где вы были вчера вечером?", own_snr_db=20.0, words=words)
-    # Явно ТИШЕ (own_snr_db=5 против 20) — по старой логике именно её пометили бы дублем,
-    # хотя в этом тесте не важно, кто реально автор: система теперь этого не решает вовсе.
     seg_b = Segment(channel=1, speaker="Опрашиваемый", start=0.1, end=2.1,
                      text="Где вы были вчера вечером?", own_snr_db=5.0, words=words)
     s.protocol.segments = [seg_a]
     s._maybe_mark_crosstalk_duplicate(seg_b)
-    assert seg_a.likely_bleed and seg_b.likely_bleed, "должны быть помечены ОБЕ копии, не одна"
-    print("CROSSTALK_DEDUP_MARKS_BOTH OK ✅")
+    assert seg_b.likely_bleed and not seg_a.likely_bleed, (
+        "при равной уверенности дублем должна быть помечена копия с более низким SNR"
+    )
+    print("CROSSTALK_DEDUP_SNR_FALLBACK OK ✅")
 
 
 def test_delete_segment_only_allowed_for_bleed_marked() -> None:
@@ -435,7 +457,8 @@ def main() -> None:
     test_prompt_has_no_recent_speech()
     test_recording_started_at_set_once()
     test_get_or_load_restores_session_after_restart()
-    test_crosstalk_dedup_marks_both_copies_not_just_weaker()
+    test_crosstalk_dedup_prefers_asr_confidence_over_snr()
+    test_crosstalk_dedup_falls_back_to_snr_when_confidence_is_close()
     test_delete_segment_only_allowed_for_bleed_marked()
     test_rename_speaker_after_diarization()
 

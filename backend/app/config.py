@@ -145,6 +145,12 @@ CROSSTALK_SCORE_THRESHOLD = float(os.getenv("CROSSTALK_SCORE_THRESHOLD", "0.5"))
 CROSSTALK_DEDUPE_MIN_SIMILARITY = float(os.getenv("CROSSTALK_DEDUPE_MIN_SIMILARITY", "0.6"))
 CROSSTALK_DEDUPE_SHORT_WORDS = int(os.getenv("CROSSTALK_DEDUPE_SHORT_WORDS", "2"))
 CROSSTALK_DEDUPE_SHORT_SNR_GAP_DB = float(os.getenv("CROSSTALK_DEDUPE_SHORT_SNR_GAP_DB", "8.0"))
+# Кто из двух копий «настоящая» — в первую очередь по уверенности ASR (среднему word.prob), а не
+# по сырому SNR: при близко расположенных микрофонах SNR ненадёжен и путает авторство (реальный
+# случай), а протёкший/искажённый звук ASR обычно распознаёт менее уверенно даже тогда. Порог —
+# минимальный разрыв уверенности, чтобы доверять ей как решающему сигналу; при разрыве меньше
+# этого уверенность у копий практически одинаковая, и решение отдаётся резервному критерию (SNR).
+CROSSTALK_DEDUPE_CONFIDENCE_GAP = float(os.getenv("CROSSTALK_DEDUPE_CONFIDENCE_GAP", "0.15"))
 
 # Эндпоинтинг (Endpointer, backend/app/audio/endpointer.py): решает, когда реплика
 # закончилась. Не путать с частотой ASR-обновлений (ASR_UPDATE_MS ниже) — это два
