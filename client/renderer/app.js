@@ -1479,11 +1479,23 @@ function bind() {
   $("stopRec").onclick = stopRecording;
   $("finalizeBtn").onclick = finalizeTimecodes;
   $("diarizeBtn").onclick = diarizeVoices;
-  $("saveBtn").onclick = () =>
-    fetch(`${HTTP}/api/save`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: SESSION }),
-    }).then(() => alert("Протокол сохранён на сервере."));
+  $("saveBtn").onclick = async () => {
+    // Раньше .then() срабатывал безусловно — «Протокол сохранён» показывалось, даже если
+    // сервер ответил ошибкой (напр. 404 «no session»), и реального protocol.json на диске не
+    // появлялось. Реальный случай: пользователь был уверен, что сохранил допрос, а его не было
+    // ни на диске, ни в списке допросов проекта.
+    try {
+      const r = await fetch(`${HTTP}/api/save`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: SESSION }),
+      });
+      const data = await r.json();
+      if (!r.ok) { alert(data.error || "Не удалось сохранить протокол."); return; }
+      alert("Протокол сохранён на сервере.");
+    } catch (e) {
+      alert("Ошибка сохранения: " + e);
+    }
+  };
   $("genDocxBtn").onclick = generateProtocolDocx;
   $("loadAudio").onclick = loadAudio;
   $("refreshMics").onclick = loadMics;
