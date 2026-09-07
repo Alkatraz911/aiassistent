@@ -36,7 +36,7 @@ from .assistant import projects as projects_store
 from .assistant.docx_import import normalize_docx, uncovered_placeholders
 from .assistant.questionnaire import build_script
 from .assistant.sessions_index import list_project_sessions
-from .models import Template, TemplateStep
+from .models import Template, TemplateStep, normalize_placeholder_token
 from .session import manager
 
 app = FastAPI(title="Протокол-ассистент MVP")
@@ -340,7 +340,14 @@ class ProfileSaveReq(BaseModel):
 
 @app.post("/api/profile")
 def save_profile(req: ProfileSaveReq) -> dict[str, str]:
-    return profile_store.store.update(req.values)
+    # Ключи — токены плейсхолдеров (`TemplateStep.placeholder or .key`), которые клиент теперь
+    # нормализует на вводе (см. app.js::normalizePlaceholderToken), а `TemplateStep`/`Template` —
+    # на сохранении шаблона (см. models.normalize_placeholder_token). Страховка и здесь: запрос
+    # мог прийти не из штатного редактора, а токены в /api/profile/fields — из шаблона,
+    # сохранённого ДО этого фикса (реальный случай: "T1.DOC_AUTHOR_FULL_INFO" и
+    # "T1.DOC_AUTHOR_FULL_INFO}" осели в profile.json как две разные записи).
+    values = {normalize_placeholder_token(k): v for k, v in req.values.items()}
+    return profile_store.store.update(values)
 
 
 # --- проекты/дела и история допросов (Блок 7) ------------------------------

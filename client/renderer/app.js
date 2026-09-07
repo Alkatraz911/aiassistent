@@ -832,6 +832,17 @@ function slugify(label, fallback) {
   return s || fallback;
 }
 
+// Плейсхолдер .docx — свободное текстовое поле, и оператор обычно копирует токен прямо из
+// текста бланка (`#{T1.DOC_AUTHOR_FULL_INFO}`), случайно прихватывая фигурные скобки/решётку
+// целиком или частично. Реальный случай, воспроизведённый на живых данных: в профиле оператора
+// оказались ДВЕ РАЗНЫЕ записи — "T1.DOC_AUTHOR_FULL_INFO" и "T1.DOC_AUTHOR_FULL_INFO}" — потому
+// что это технически разные строки-ключи, хотя должны были быть одним и тем же полем. Убираем
+// `{`, `}`, `#` и лишние пробелы по краям везде, где токен вводится вручную (см. также backend-
+// страховку `models.normalize_placeholder_token`).
+function normalizePlaceholderToken(value) {
+  return (value || "").replace(/[{}#]/g, "").trim();
+}
+
 function collectStepsFromEditor() {
   const rows = [...$("templateSteps").querySelectorAll(".step-row")];
   const used = new Set();
@@ -850,7 +861,7 @@ function collectStepsFromEditor() {
         ? row.querySelector(".step-auto-kind").value
         : row.querySelector(".step-extractor").value,
       source,
-      placeholder: row.querySelector(".step-placeholder").value.trim(),
+      placeholder: normalizePlaceholderToken(row.querySelector(".step-placeholder").value),
       statement: row.querySelector(".step-statement").value.trim(),
       question: row.querySelector(".step-question").value.trim(),
     };
@@ -862,7 +873,7 @@ async function saveTemplate() {
   if (!name) { $("templateHint").textContent = "Укажите название шаблона."; return; }
   const steps = collectStepsFromEditor();
   if (!steps.length) { $("templateHint").textContent = "Добавьте хотя бы один шаг."; return; }
-  const qaPlaceholder = $("templateQaPlaceholder").value.trim() || null;
+  const qaPlaceholder = normalizePlaceholderToken($("templateQaPlaceholder").value) || null;
   // Обязательно у шаблонов с докс-файлом — иначе записанный диалог молча не попадёт в
   // итоговый документ (docgen.render просто не знает, в какой плейсхолдер его вставлять).
   if (state.importedDocxFilename && !qaPlaceholder) {
