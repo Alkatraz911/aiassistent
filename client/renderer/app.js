@@ -347,11 +347,20 @@ function showAutoConfirm(text) {
 }
 
 async function advanceInfo() {
-  const r = await fetch(`${HTTP}/api/assistant/next`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION }),
-  }).then((x) => x.json());
-  handleNext(r);
+  // Раньше ответ сервера не проверялся вовсе — на 404 (напр. «no session») `r.next` было бы
+  // undefined, и весь дальнейший показ шага падал бы с необработанным исключением (см. фикс
+  // «Сохранить», 33326ea, тот же класс ошибки: fetch() резолвится и на HTTP-ошибке).
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/next`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось перейти к следующему шагу анкеты."); return; }
+    handleNext(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 function handleNext(r) {
@@ -368,11 +377,19 @@ function handleNext(r) {
 
 async function startAssistant() {
   if (!state.projectId) { alert("Сначала выберите или создайте проект (дело) — см. вверху панели."); return; }
-  const step = await fetch(`${HTTP}/api/assistant/start`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
-  }).then((x) => x.json());
-  showStep(step);
+  // См. комментарий в advanceInfo(): без проверки r.ok ошибка сервера (напр. «шаблон не найден»,
+  // 404) раньше рендерилась прямо в подсказке ассистента как «🤖 undefined».
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/start`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось начать анкету."); return; }
+    showStep(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 // ---------- проекты/дела и история допросов (Блок 7) ----------
@@ -402,14 +419,26 @@ async function loadProjects() {
 
 // Привязывает текущий SESSION к выбранному проекту на сервере — до начала анкеты/записи, чтобы
 // допрос попал в список проекта независимо от того, с чего реально начнётся работа.
+//
+// Раньше ответ сервера не проверялся вовсе (fetch() без .then/await результата) — при ошибке на
+// сервере (напр. 404 «проект не найден») сессия молча оставалась без привязанного проекта, а
+// клиентский гейт (`state.projectId`, см. startRecording/startAssistant) этого не ловил: он
+// проверяет только свою локальную переменную, а не то, что сервер реально принял привязку. Тот
+// же класс ошибки и тот же фикс, что и у кнопки «Сохранить» (33326ea).
 async function initSessionProject() {
   if (!state.projectId) return;
   try {
-    await fetch(`${HTTP}/api/session/init`, {
+    const r = await fetch(`${HTTP}/api/session/init`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: SESSION, project_id: state.projectId }),
     });
-  } catch {}
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || "Не удалось привязать допрос к проекту на сервере.");
+    }
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 // window.prompt() здесь намеренно не используется — в Electron он ненадёжен (зависит от
@@ -922,11 +951,18 @@ async function confirmAnswer() {
   stopAutoListening();
   const answer = $("answerInput").value.trim();
   if (!answer) return;
-  const r = await fetch(`${HTTP}/api/assistant/answer`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, answer }),
-  }).then((x) => x.json());
-  handleNext(r);
+  // См. комментарий в advanceInfo() — тот же класс ошибки: ответ сервера раньше не проверялся.
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/answer`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION, answer }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось сохранить ответ."); return; }
+    handleNext(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 let answerRec = null;
