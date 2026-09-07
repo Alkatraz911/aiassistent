@@ -1014,11 +1014,17 @@ function renderFields(fields) {
 
 async function saveFieldEdit(key, td) {
   const value = td.innerText.trim();
-  const r = await fetch(`${HTTP}/api/assistant/field`, {
+  const resp = await fetch(`${HTTP}/api/assistant/field`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION, key, value }),
-  }).then((x) => x.json());
-  if (!r.ok) return;   // ключа нет в текущем сценарии — сюда в норме не попасть, но не рвём UI
+  });
+  const data = await resp.json();
+  // Раньше здесь проверялось `data.ok` — бизнес-флаг из ТЕЛА ответа (main.py::assistant_field
+  // возвращает {"ok": ok, "fields": ...} с кодом 200 даже когда ключа нет в текущем сценарии),
+  // а не реальный HTTP-статус. Из-за этого настоящую ошибку сервера (напр. 404 «no session»,
+  // где тела с полем "ok" вообще нет) от штатного «ключ не найден» было не отличить — обе давали
+  // falsy `data.ok`. Проверяем `resp.ok` (реальный статус), а не поле тела ответа.
+  if (!resp.ok) return;   // ключа нет в текущем сценарии — сюда в норме не попасть, но не рвём UI
   td.classList.toggle("filled", !!value);
 }
 
@@ -1585,7 +1591,21 @@ function bind() {
   $("profileSaveBtn").onclick = saveProfile;
 
   $("projectSelect").onchange = async () => {
-    state.projectId = $("projectSelect").value || null;
+    const sel = $("projectSelect");
+    const newId = sel.value || null;
+    // Допрос уже идёт (анкета начата и/или запись пишется) — случайный клик по выпадающему
+    // списку молча перепривязал бы текущую сессию к другому делу (реальный риск: список стоит
+    // прямо над остальной панелью, промахнуться легко). Как и с удалением шаблона — обычный
+    // confirm() перед необратимым в моменте действием, тот же паттерн, что и везде в клиенте.
+    const midInterrogation = state.recording || !!state.assistantStep;
+    if (midInterrogation && newId !== state.projectId && !confirm(
+      "Допрос уже идёт (анкета или запись). Сменить проект сейчас — привязать текущий допрос " +
+      "к другому делу. Продолжить?"
+    )) {
+      sel.value = state.projectId || "";
+      return;
+    }
+    state.projectId = newId;
     await initSessionProject();
   };
   $("newProjectBtn").onclick = createProject;

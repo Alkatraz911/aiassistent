@@ -15,6 +15,14 @@ from ..models import Protocol, SessionSummary
 # с человекочитаемыми названиями вроде "Фамилия", "Имя и отчество" и т.п.
 _FIO_LABEL_WORDS = ("фамили", "имя", "отчеств", "фио")
 
+# Запасной сигнал — латинские токены плейсхолдеров, которые генерирует импорт .docx (Блок 6,
+# `docx_import.normalize_docx`): шаг тогда создаётся с label = сам токен (напр. "T1.PARTICIP_
+# SURNAME"), пока оператор не переименует его вручную (см. main.py::import_docx_template) —
+# ни одно из русских слов _FIO_LABEL_WORDS в такой label не встречается, и допрос до переименования
+# показывался в списке как «Без названия» (реальный случай). Ищем эти же слова уже в токене
+# плейсхолдера, а не в названии шага.
+_FIO_PLACEHOLDER_WORDS = ("surname", "фамили", "name", "имя", "patronymic", "отчеств", "fio", "фио")
+
 
 def _display_name(protocol: Protocol) -> str:
     if protocol.template_snapshot is None:
@@ -24,6 +32,11 @@ def _display_name(protocol: Protocol) -> str:
     fio_steps = [s for s in steps if s.extractor == "fio"]
     if not fio_steps:
         fio_steps = [s for s in steps if any(w in s.label.lower() for w in _FIO_LABEL_WORDS)]
+    if not fio_steps:
+        fio_steps = [
+            s for s in steps
+            if any(w in (s.placeholder or "").lower() for w in _FIO_PLACEHOLDER_WORDS)
+        ]
     # Порядок шагов — порядок появления плейсхолдеров в бланке (см. docx_import), а у реальных
     # протоколов это фамилия/имя/отчество именно в таком порядке — переставлять не нужно.
     parts = [answers.get(s.key, "").strip() for s in fio_steps]
