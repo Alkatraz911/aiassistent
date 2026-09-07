@@ -47,8 +47,9 @@ def _build_protocol() -> Protocol:
     protocol = Protocol(
         session_id="sess1",
         questionnaire=[
-            QuestionnaireField(key="fio", label="ФИО", value="Иванов Иван Иванович"),
-            QuestionnaireField(key="address", label="Адрес", value="г. Москва"),
+            QuestionnaireField(key="fio", label="ФИО", value="Иванов Иван Иванович",
+                               confirmed=True),
+            QuestionnaireField(key="address", label="Адрес", value="г. Москва", confirmed=True),
             QuestionnaireField(key="birth", label="Дата рождения", value=""),   # незаполненное
         ],
         segments=[
@@ -88,6 +89,35 @@ def test_build_qa_transcript_merges_consecutive_same_channel() -> None:
     ]
 
 
+def test_build_qa_transcript_diarized_single_mic_alternates_by_speaker_label() -> None:
+    """Реальный баг: `Session.diarize_single_mic` разводит голоса общего микрофона по
+    `Segment.speaker` ("Голос-1"/"Голос-2"), НЕ трогая канал — все реплики остаются `channel=0`.
+    Старая проверка `channel == 0` в этом случае схлопывала весь диалог в один абзац «Вопрос:» —
+    ни одного «Ответ:» не появлялось. Тот же сценарий (все сегменты на одном канале), что и
+    `_build_protocol`, но роль решается по метке говорящего, а не по каналу."""
+    segments = [
+        Segment(channel=0, speaker="Голос-1", start=0.0, end=1.0,
+                text="Назовите ваше имя."),
+        Segment(channel=0, speaker="Голос-2", start=1.0, end=2.0,
+                text="Иванов Иван"),
+        Segment(channel=0, speaker="Голос-2", start=2.0, end=3.0,
+                text="Иванович."),   # тот же говорящий подряд — должно слиться в один абзац
+        Segment(channel=0, speaker="Голос-1", start=3.0, end=4.0,
+                text="Ваш адрес?"),
+        Segment(channel=0, speaker="Голос-2", start=4.0, end=5.0,
+                text="Москва."),
+    ]
+    transcript = docgen.build_qa_transcript(segments, {}.get)
+    print(f"стенограмма (диаризованный общий микрофон):\n{transcript}")
+    paragraphs = transcript.split("\n\n")
+    assert paragraphs == [
+        "Вопрос: Назовите ваше имя.",
+        "Ответ: Иванов Иван Иванович.",
+        "Вопрос: Ваш адрес?",
+        "Ответ: Москва.",
+    ]
+
+
 def test_render_fills_fields_and_transcript() -> None:
     protocol = _build_protocol()
     with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +146,9 @@ def test_render_fills_fields_and_transcript() -> None:
 
 
 def test_render_uses_missing_marker_for_empty_answer() -> None:
+    """Поле НИКОГДА не отвечали (не попало в `self.answers` — см. `AssistantSession.to_fields`,
+    поэтому `confirmed` тут по умолчанию False) — это и есть «не заполнено», MISSING_MARKER
+    ожидаем. Обратный случай (пусто, но подтверждено оператором) — см. тест ниже."""
     steps = [TemplateStep(key="birth", label="Дата рождения", kind="field",
                           placeholder="T1.BIRTH")]
     tmpl = Template(id="tmpl2", name="Тестовый2", steps=steps, docx_filename="tmpl2.docx")
@@ -136,6 +169,35 @@ def test_render_uses_missing_marker_for_empty_answer() -> None:
         text = _doc_text(out_path)
         print(f"итоговый документ:\n{text}")
         assert MISSING_MARKER in text
+
+
+def test_render_keeps_confirmed_empty_answer_without_missing_marker() -> None:
+    """Реальный случай из багрепорта: `value or MISSING_MARKER` не отличал поле, на которое
+    оператор осознанно ответил пустотой (напр. «отчества нет», подтверждено голосом/правкой —
+    `confirmed=True`), от поля, которое вообще не задавали. Подтверждённая пустая строка не
+    должна попадать под MISSING_MARKER."""
+    steps = [TemplateStep(key="patronymic", label="Отчество", kind="field",
+                          placeholder="T1.PATRONYMIC")]
+    tmpl = Template(id="tmpl7", name="Тестовый7", steps=steps, docx_filename="tmpl7.docx")
+    protocol = Protocol(
+        session_id="sess7",
+        questionnaire=[QuestionnaireField(key="patronymic", label="Отчество", value="",
+                                          confirmed=True)],
+        template_snapshot=tmpl,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        template_path = tmp_path / "tmpl7.docx"
+        doc = Document()
+        doc.add_paragraph("Отчество: {{ T1_PATRONYMIC }}#")
+        doc.save(str(template_path))
+        out_path = tmp_path / "protocol7.docx"
+
+        docgen.render(protocol, template_path, out_path)
+        text = _doc_text(out_path)
+        print(f"итоговый документ:\n{text}")
+        assert "Отчество: #" in text, "подтверждённая пустая строка не должна стать MISSING_MARKER"
+        assert MISSING_MARKER not in text
 
 
 def test_render_uses_profile_store_for_profile_source_steps() -> None:
@@ -229,7 +291,8 @@ def test_render_flags_placeholder_not_covered_by_any_step() -> None:
     tmpl = Template(id="tmpl6", name="Тестовый6", steps=steps, docx_filename="tmpl6.docx")
     protocol = Protocol(
         session_id="sess6",
-        questionnaire=[QuestionnaireField(key="fio", label="ФИО", value="Иванов")],
+        questionnaire=[QuestionnaireField(key="fio", label="ФИО", value="Иванов",
+                                          confirmed=True)],
         template_snapshot=tmpl,
     )
     with tempfile.TemporaryDirectory() as tmp:
@@ -261,8 +324,10 @@ def test_render_requires_template_snapshot() -> None:
 
 def main() -> None:
     test_build_qa_transcript_merges_consecutive_same_channel()
+    test_build_qa_transcript_diarized_single_mic_alternates_by_speaker_label()
     test_render_fills_fields_and_transcript()
     test_render_uses_missing_marker_for_empty_answer()
+    test_render_keeps_confirmed_empty_answer_without_missing_marker()
     test_render_uses_profile_store_for_profile_source_steps()
     test_render_computes_auto_date_and_time_fields()
     test_render_flags_placeholder_not_covered_by_any_step()
