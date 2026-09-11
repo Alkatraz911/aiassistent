@@ -48,6 +48,14 @@ class UtteranceHypothesis:
     # committed_words: колбэк финала захватывает гипотезу напрямую, а не текущее состояние канала.
     snr_sum: float = 0.0
     snr_count: int = 0
+    # То же накопление, но для покадрового bleed_score (см. CrossTalkScorer.score) — насколько
+    # часто и сильно ДРУГОЙ канал в моменте перекрикивал этот за время реплики. Нужно отдельно от
+    # own_snr_db: own_snr_db — громкость относительно СВОЕГО пола шума, а bleed_score — прямое
+    # межканальное сравнение; при близких микрофонах первое может быть высоким (голос громче
+    # своего шума) даже когда реплика на деле — протёкший чужой голос (см.
+    # Session._maybe_mark_crosstalk_duplicate, резервный путь по CROSSTALK_DEDUPE_BLEED_FALLBACK).
+    bleed_sum: float = 0.0
+    bleed_count: int = 0
 
     def add_snr_sample(self, snr_db: float) -> None:
         self.snr_sum += snr_db
@@ -56,6 +64,14 @@ class UtteranceHypothesis:
     @property
     def avg_snr_db(self) -> float:
         return self.snr_sum / self.snr_count if self.snr_count else 0.0
+
+    def add_bleed_sample(self, bleed_score: float) -> None:
+        self.bleed_sum += bleed_score
+        self.bleed_count += 1
+
+    @property
+    def live_bleed_score(self) -> float:
+        return self.bleed_sum / self.bleed_count if self.bleed_count else 0.0
 
     def apply_partial(self, tail_words: list[ASRWord], sample_rate: int) -> dict:
         """`tail_words` — слова текущего decode-раунда, абсолютные тайм-коды, уже отфильтрованные

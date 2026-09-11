@@ -224,6 +224,7 @@ class Session:
             st = self.stream.setdefault(channel, ChannelStreamState())
             if st.hypothesis is not None:
                 st.hypothesis.add_snr_sample(own_snr_db)
+                st.hypothesis.add_bleed_sample(bleed_score)
             st.rolling.add(asr_input)
             events = st.endpointer.add(asr_input)
             for ev in events:
@@ -231,6 +232,7 @@ class Session:
                     self._on_utterance_start(channel, st, ev)
                     if st.hypothesis is not None:   # свежесозданная гипотеза — не теряем этот кадр
                         st.hypothesis.add_snr_sample(own_snr_db)
+                        st.hypothesis.add_bleed_sample(bleed_score)
                 elif ev.kind == "utterance_end":
                     self._on_utterance_end(channel, st, ev)
 
@@ -446,7 +448,7 @@ class Session:
                 channel=channel, speaker=label, speaker_auto=f"Голос-{channel + 1}",
                 start=all_words[0].start, end=all_words[-1].end, text=text, text_original=text,
                 words=[Word(text=w.text, start=w.start, end=w.end, prob=w.prob) for w in all_words],
-                own_snr_db=hyp.avg_snr_db, created_at=recorded_at,
+                own_snr_db=hyp.avg_snr_db, live_bleed_score=hyp.live_bleed_score, created_at=recorded_at,
             )
             # Вставляем по времени начала, а не в конец: финал из устаревшего захода записи
             # (см. epoch выше) может «доехать» позже, чем сегменты нового захода, которые уже
@@ -466,11 +468,20 @@ class Session:
 
     def _maybe_mark_crosstalk_duplicate(self, new_seg: Segment) -> None:
         """Пост-ASR дедупликация (Блок 3.7). Вызывать под `self._lock` (уже держит
-        `_finish_utterance`). Сравнивает уже РАСПОЗНАННЫЙ текст+время с сегментами других каналов
-        — надёжнее, чем сырая покадровая энергия (см. `crosstalk.py`): реальный тест показал, что
-        при близко расположенных микрофонах разница энергии часто в пределах шума, а вот
-        текстовое совпадение между «протёкшей» и «настоящей» репликой — почти всегда почти
-        дословное. Ничего не удаляет.
+        `_finish_utterance`). В первую очередь сравнивает уже РАСПОЗНАННЫЙ текст+время с
+        сегментами других каналов — надёжнее, чем сырая покадровая энергия (см. `crosstalk.py`):
+        реальный тест показал, что при близко расположенных микрофонах разница энергии часто в
+        пределах шума, а вот текстовое совпадение между «протёкшей» и «настоящей» репликой —
+        почти всегда почти дословное. Ничего не удаляет.
+
+        Резервный путь при СИЛЬНО разошедшемся тексте (см. CROSSTALK_DEDUPE_BLEED_FALLBACK ниже):
+        реальный случай — микрофоны ближе метра друг от друга, протёкший звук на «чужом» канале
+        получается настолько тихим/искажённым, что ASR распознаёт его совершенно другими словами,
+        и текстовое сравнение пару вообще не находит — реплика остаётся висеть как «уникальная»,
+        хотя это тот же самый разговор. В этом случае решение принимается по `live_bleed_score`
+        (прямое межканальное сравнение громкости в реальном времени, см. CrossTalkScorer.score) —
+        том же сигнале, что уже гасит звук на лету (CROSSTALK_SCORE_THRESHOLD), просто усреднённом
+        по всей реплике, а не по одному кадру.
 
         При близких микрофонах система НЕ МОЖЕТ надёжно решить, кто из двух реальный автор —
         реальный случай: по одному только SNR дублем помечалась именно та копия, которую человек
@@ -496,14 +507,20 @@ class Session:
                 continue   # нет пересечения по времени
             similarity = difflib.SequenceMatcher(
                 None, new_seg.text.lower(), other.text.lower()).ratio()
-            if similarity < config.CROSSTALK_DEDUPE_MIN_SIMILARITY:
-                continue
-            is_short = (len(new_seg.words) <= config.CROSSTALK_DEDUPE_SHORT_WORDS
-                        or len(other.words) <= config.CROSSTALK_DEDUPE_SHORT_WORDS)
-            snr_gap = abs(new_seg.own_snr_db - other.own_snr_db)
-            if is_short and snr_gap < config.CROSSTALK_DEDUPE_SHORT_SNR_GAP_DB:
-                # Короткие реплики («да»/«угу») совпадают по тексту почти всегда тривиально —
-                # без явного разрыва по SNR это не доказательство протечки (см. Блок 3.7 плана).
+            bleed_evidence = max(new_seg.live_bleed_score, other.live_bleed_score)
+            text_match = similarity >= config.CROSSTALK_DEDUPE_MIN_SIMILARITY
+            if text_match:
+                is_short = (len(new_seg.words) <= config.CROSSTALK_DEDUPE_SHORT_WORDS
+                            or len(other.words) <= config.CROSSTALK_DEDUPE_SHORT_WORDS)
+                snr_gap = abs(new_seg.own_snr_db - other.own_snr_db)
+                if is_short and snr_gap < config.CROSSTALK_DEDUPE_SHORT_SNR_GAP_DB:
+                    # Короткие реплики («да»/«угу») совпадают по тексту почти всегда тривиально —
+                    # без явного разрыва по SNR это не доказательство протечки (Блок 3.7 плана).
+                    continue
+                pair_score = similarity
+            elif bleed_evidence >= config.CROSSTALK_DEDUPE_BLEED_FALLBACK:
+                pair_score = bleed_evidence   # текст разошёлся, но акустика однозначна
+            else:
                 continue
 
             new_prob, other_prob = avg_word_prob(new_seg), avg_word_prob(other)
@@ -513,9 +530,9 @@ class Session:
                 weaker, stronger = ((new_seg, other) if new_seg.own_snr_db < other.own_snr_db
                                      else (other, new_seg))
             new_seg.likely_bleed = True
-            new_seg.bleed_score = round(similarity, 3)
+            new_seg.bleed_score = round(pair_score, 3)
             other.likely_bleed = True
-            other.bleed_score = round(similarity, 3)
+            other.bleed_score = round(pair_score, 3)
             new_seg.bleed_pair_id = other.id
             other.bleed_pair_id = new_seg.id
             weaker.bleed_hint = "likely_leak"
