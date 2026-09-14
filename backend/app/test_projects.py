@@ -78,9 +78,50 @@ def test_list_project_sessions_filters_by_project_and_extracts_fio_and_date() ->
             config.STORAGE_DIR = original_dir
 
 
+def test_list_project_sessions_falls_back_to_placeholder_token_for_fio_when_label_unrecognized() -> None:
+    """Реальный случай (Блок 6): шаблон импортирован из .docx и ещё не отредактирован оператором
+    — названия шагов совпадают с латинскими токенами плейсхолдеров ("T1.PARTICIP_SURNAME"), и ни
+    одно из русских слов-сигналов (_FIO_LABEL_WORDS) в них не встречается. Раньше это давало
+    display_name = "" (список показывал «Без названия») — эвристика должна дополнительно
+    проверять сам токен плейсхолдера (SURNAME/NAME), а не только человекочитаемую метку."""
+    with tempfile.TemporaryDirectory() as tmp:
+        storage_dir = Path(tmp)
+        original_dir = config.STORAGE_DIR
+        config.STORAGE_DIR = storage_dir
+        try:
+            steps = [
+                TemplateStep(key="surname", label="T1.PARTICIP_SURNAME",
+                             placeholder="T1.PARTICIP_SURNAME"),
+                TemplateStep(key="name", label="T1.PARTICIP_NAME",
+                             placeholder="T1.PARTICIP_NAME"),
+            ]
+            tmpl = Template(id="t2", name="Импортированный бланк", steps=steps)
+            proto = Protocol(
+                session_id="sess-imported", project_id="proj-1",
+                template_name=tmpl.name, template_snapshot=tmpl,
+                questionnaire=[
+                    QuestionnaireField(key="surname", label="T1.PARTICIP_SURNAME", value="Петров"),
+                    QuestionnaireField(key="name", label="T1.PARTICIP_NAME", value="Сидор"),
+                ],
+                segments=[Segment(channel=1, text="ответ")],
+            )
+            d = storage_dir / proto.session_id
+            d.mkdir(parents=True)
+            (d / "protocol.json").write_text(proto.model_dump_json(), encoding="utf-8")
+
+            result = sessions_index.list_project_sessions("proj-1")
+            print(f"результат: {result}")
+            assert len(result) == 1
+            assert result[0].display_name == "Петров Сидор", \
+                "эвристика ФИО должна сработать по токену плейсхолдера, раз label не распознан"
+        finally:
+            config.STORAGE_DIR = original_dir
+
+
 def main() -> None:
     test_project_store_create_list_get()
     test_list_project_sessions_filters_by_project_and_extracts_fio_and_date()
+    test_list_project_sessions_falls_back_to_placeholder_token_for_fio_when_label_unrecognized()
     print("\nTEST_PROJECTS OK ✅")
 
 

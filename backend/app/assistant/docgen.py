@@ -69,32 +69,53 @@ AUTO_FIELDS: dict[str, Callable[[Protocol], str | None]] = {
 
 
 def build_qa_transcript(segments: list[Segment], speaker_label: Callable[[int], str]) -> str:
-    """Стенограмма допроса как чередование «Вопрос:»/«Ответ:». `speaker_label` в сигнатуре — для
-    единообразия с остальным кодом сессии, где подпись спикера всегда резолвится через колбэк;
-    сам текст здесь размечается не по имени, а по каналу (см. допущение ниже).
+    """Стенограмма допроса как чередование «Вопрос:»/«Ответ:».
 
-    Допущение (как и везде в проекте, канал 0 = интервьюер по умолчанию): канал 0 — «Вопрос:»,
-    любой другой канал — «Ответ:». Это тот же принцип, что и `Session.speaker_label`.
-    """
-    ordered = sorted(segments, key=lambda s: s.start)
+    Раздельные микрофоны (обычный режим, как и везде в проекте: канал 0 = интервьюер по
+    умолчанию, см. `Session.speaker_label`) — роль реплики решает канал: 0 — «Вопрос:», любой
+    другой — «Ответ:». Но после `Session.diarize_single_mic` (общий микрофон, один канал на
+    обоих участников) КАНАЛ у всех реплик остаётся 0 — голоса разводятся по `Segment.speaker`
+    ("Голос-1"/"Голос-2", дальше оператор переименовывает через `rename_speaker`), сам канал
+    при этом не трогается. Проверка `channel == 0` в этом случае была неотличима от «интервьюер
+    сказал вообще всё» — весь диалог схлопывался в один абзац «Вопрос:» без единого «Ответ:»
+    (реальный баг). `speaker_label` в сигнатуре ниже не используется намеренно — он резолвит
+    только канал, а после диаризации все реплики на одном канале, так что он не может различить
+    два голоса; для этого нужна МЕТКА конкретной реплики (`Segment.speaker`), не канал.
+
+    Поэтому: если среди реплик встречается больше одного канала — как раньше, по каналу; если
+    канал один и тот же у всех (диаризованный общий микрофон) — по метке говорящего, считая
+    первого говорившего «Вопрос:» (интервьюер по построению сценария начинает допрос первым), а
+    любую другую метку — «Ответ:»."""
+    ordered = [s for s in sorted(segments, key=lambda s: s.start) if s.text.strip()]
+    if not ordered:
+        return ""
+
+    channels = {s.channel for s in ordered}
+    if len(channels) > 1:
+        def role_of(seg: Segment) -> int:
+            return 0 if seg.channel == 0 else 1
+    else:
+        first_speaker = ordered[0].speaker
+
+        def role_of(seg: Segment) -> int:
+            return 0 if seg.speaker == first_speaker else 1
 
     paragraphs: list[str] = []
-    cur_channel: int | None = None
+    cur_role: int | None = None
     cur_parts: list[str] = []
 
     def flush():
-        if cur_channel is None or not cur_parts:
+        if cur_role is None or not cur_parts:
             return
-        prefix = "Вопрос: " if cur_channel == 0 else "Ответ: "
+        prefix = "Вопрос: " if cur_role == 0 else "Ответ: "
         paragraphs.append(prefix + " ".join(cur_parts))
 
     for seg in ordered:
+        role = role_of(seg)
         text = seg.text.strip()
-        if not text:
-            continue
-        if seg.channel != cur_channel:
+        if role != cur_role:
             flush()
-            cur_channel = seg.channel
+            cur_role = role
             cur_parts = [text]
         else:
             cur_parts.append(text)
@@ -110,7 +131,7 @@ def render(protocol: Protocol, docx_template_path: Path, out_path: Path) -> Path
             "у протокола нет снапшота шаблона с привязанным .docx — сгенерировать документ нечем"
         )
 
-    answers = {f.key: f.value for f in protocol.questionnaire}
+    questionnaire_by_key = {f.key: f for f in protocol.questionnaire}
     profile_values = profile_store.get_all()
 
     context: dict[str, str] = {}
@@ -123,12 +144,25 @@ def render(protocol: Protocol, docx_template_path: Path, out_path: Path) -> Path
         # оператора, авто — вычисляется из реального времени записи (см. AUTO_FIELDS выше).
         if step.source == "profile":
             value = profile_values.get(token)
+            missing = not value
         elif step.source == "auto":
             auto_fn = AUTO_FIELDS.get(step.extractor)
             value = auto_fn(protocol) if auto_fn else None
+            missing = not value
         else:
-            value = answers.get(step.key)
-        context[jinja_key(token)] = value or MISSING_MARKER
+            # `value or MISSING_MARKER` не отличал бы поле, на которое оператор осознанно
+            # ответил пустотой (напр. отчества нет), от поля, которое вообще не задавали и не
+            # подтверждали (реальный случай: протокол показывал «не заполнено» напротив
+            # отчества, хотя оператор явно его подтвердил пустым). `QuestionnaireField.confirmed`
+            # — True ровно тогда, когда ключ реально попал в ответы анкеты (голосом через
+            # `AssistantSession.submit_answer`, либо правкой через `set_answer` — таблица полей
+            # в клиенте), см. `AssistantSession.to_fields`. Отсутствие в `questionnaire` вообще
+            # (шаг добавили в шаблон, но снапшот протокола снят раньше) считаем тем же «никогда
+            # не отвечали».
+            field = questionnaire_by_key.get(step.key)
+            value = field.value if field is not None else None
+            missing = field is None or not field.confirmed
+        context[jinja_key(token)] = MISSING_MARKER if missing else value
 
     qa_placeholder = protocol.template_snapshot.qa_placeholder
     if qa_placeholder:

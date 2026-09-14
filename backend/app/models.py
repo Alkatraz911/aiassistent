@@ -7,15 +7,33 @@
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+_PLACEHOLDER_STRAY_CHARS_RE = re.compile(r"[{}#]")
+
+
+def normalize_placeholder_token(value: str) -> str:
+    """Плейсхолдер докс-шаблона обычно копируется оператором прямо из текста бланка
+    (`#{T1.DOC_AUTHOR_FULL_INFO}`) в свободное текстовое поле редактора шаблона — фигурные
+    скобки/решётка целиком или частично цепляются вместе с токеном. Реальный случай,
+    воспроизведённый на живых данных: в `storage/operator_profile.json` оказались ДВЕ РАЗНЫЕ
+    записи — "T1.DOC_AUTHOR_FULL_INFO" и "T1.DOC_AUTHOR_FULL_INFO}" — потому что это технически
+    разные строки-ключи, хотя должны были быть одним и тем же полем. Клиент нормализует то же
+    самое на вводе (см. app.js::normalizePlaceholderToken) — это серверная страховка на случай,
+    если запрос пришёл не из штатного редактора (или из уже собранного до фикса клиента)."""
+    if not value:
+        return value
+    return _PLACEHOLDER_STRAY_CHARS_RE.sub("", value).strip()
 
 
 class Word(BaseModel):
@@ -61,6 +79,12 @@ class Segment(BaseModel):
     # надёжно решить, кто реальный автор, поэтому помечаются ОБЕ копии дубля одинаково; удаление —
     # ручное действие оператора (см. Session.delete_segment), сама пометка ничего не стирает.
     own_snr_db: float = 0.0
+    # Средний покадровый bleed_score (см. CrossTalkScorer.score) за время реплики — прямое
+    # межканальное сравнение громкости в реальном времени, а не пост-ASR сравнение текста ниже.
+    # Резервный сигнал для Session._maybe_mark_crosstalk_duplicate: при близких микрофонах
+    # протёкший звук ASR иногда распознаёт настолько исказившимся текстом, что текстовое сравнение
+    # пару не находит вовсе — этот сигнал ловит именно такие случаи.
+    live_bleed_score: float = 0.0
     likely_bleed: bool = False
     bleed_score: float = 0.0
     # Ориентир для оператора (не решение!): по уверенности ASR/SNR какая из двух копий пары
@@ -115,6 +139,11 @@ class TemplateStep(BaseModel):
     # (см. questionnaire.build_script) — оба берут значение не из ответов сессии.
     source: Literal["asr", "manual", "profile", "auto"] = "asr"
 
+    @field_validator("placeholder")
+    @classmethod
+    def _clean_placeholder(cls, v: str) -> str:
+        return normalize_placeholder_token(v)
+
 
 class Template(BaseModel):
     """Именованный шаблон анкеты — пользователь может завести несколько под разные сценарии
@@ -135,6 +164,11 @@ class Template(BaseModel):
     docx_filename: Optional[str] = None
     # Токен докс-шаблона, в который уходит полная стенограмма «Вопрос/Ответ» допроса.
     qa_placeholder: Optional[str] = None
+
+    @field_validator("qa_placeholder")
+    @classmethod
+    def _clean_qa_placeholder(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_placeholder_token(v) if v else v
 
 
 class TemplateSummary(BaseModel):

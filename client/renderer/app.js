@@ -351,11 +351,20 @@ function showAutoConfirm(text) {
 }
 
 async function advanceInfo() {
-  const r = await fetch(`${HTTP}/api/assistant/next`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION }),
-  }).then((x) => x.json());
-  handleNext(r);
+  // Раньше ответ сервера не проверялся вовсе — на 404 (напр. «no session») `r.next` было бы
+  // undefined, и весь дальнейший показ шага падал бы с необработанным исключением (см. фикс
+  // «Сохранить», 33326ea, тот же класс ошибки: fetch() резолвится и на HTTP-ошибке).
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/next`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось перейти к следующему шагу анкеты."); return; }
+    handleNext(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 function handleNext(r) {
@@ -372,11 +381,19 @@ function handleNext(r) {
 
 async function startAssistant() {
   if (!state.projectId) { alert("Сначала выберите или создайте проект (дело) — см. вверху панели."); return; }
-  const step = await fetch(`${HTTP}/api/assistant/start`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
-  }).then((x) => x.json());
-  showStep(step);
+  // См. комментарий в advanceInfo(): без проверки r.ok ошибка сервера (напр. «шаблон не найден»,
+  // 404) раньше рендерилась прямо в подсказке ассистента как «🤖 undefined».
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/start`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION, template_id: state.templateId }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось начать анкету."); return; }
+    showStep(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 // ---------- проекты/дела и история допросов (Блок 7) ----------
@@ -406,14 +423,26 @@ async function loadProjects() {
 
 // Привязывает текущий SESSION к выбранному проекту на сервере — до начала анкеты/записи, чтобы
 // допрос попал в список проекта независимо от того, с чего реально начнётся работа.
+//
+// Раньше ответ сервера не проверялся вовсе (fetch() без .then/await результата) — при ошибке на
+// сервере (напр. 404 «проект не найден») сессия молча оставалась без привязанного проекта, а
+// клиентский гейт (`state.projectId`, см. startRecording/startAssistant) этого не ловил: он
+// проверяет только свою локальную переменную, а не то, что сервер реально принял привязку. Тот
+// же класс ошибки и тот же фикс, что и у кнопки «Сохранить» (33326ea).
 async function initSessionProject() {
   if (!state.projectId) return;
   try {
-    await fetch(`${HTTP}/api/session/init`, {
+    const r = await fetch(`${HTTP}/api/session/init`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: SESSION, project_id: state.projectId }),
     });
-  } catch {}
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      alert(data.error || "Не удалось привязать допрос к проекту на сервере.");
+    }
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 // window.prompt() здесь намеренно не используется — в Electron он ненадёжен (зависит от
@@ -807,6 +836,17 @@ function slugify(label, fallback) {
   return s || fallback;
 }
 
+// Плейсхолдер .docx — свободное текстовое поле, и оператор обычно копирует токен прямо из
+// текста бланка (`#{T1.DOC_AUTHOR_FULL_INFO}`), случайно прихватывая фигурные скобки/решётку
+// целиком или частично. Реальный случай, воспроизведённый на живых данных: в профиле оператора
+// оказались ДВЕ РАЗНЫЕ записи — "T1.DOC_AUTHOR_FULL_INFO" и "T1.DOC_AUTHOR_FULL_INFO}" — потому
+// что это технически разные строки-ключи, хотя должны были быть одним и тем же полем. Убираем
+// `{`, `}`, `#` и лишние пробелы по краям везде, где токен вводится вручную (см. также backend-
+// страховку `models.normalize_placeholder_token`).
+function normalizePlaceholderToken(value) {
+  return (value || "").replace(/[{}#]/g, "").trim();
+}
+
 function collectStepsFromEditor() {
   const rows = [...$("templateSteps").querySelectorAll(".step-row")];
   const used = new Set();
@@ -825,7 +865,7 @@ function collectStepsFromEditor() {
         ? row.querySelector(".step-auto-kind").value
         : row.querySelector(".step-extractor").value,
       source,
-      placeholder: row.querySelector(".step-placeholder").value.trim(),
+      placeholder: normalizePlaceholderToken(row.querySelector(".step-placeholder").value),
       statement: row.querySelector(".step-statement").value.trim(),
       question: row.querySelector(".step-question").value.trim(),
     };
@@ -837,7 +877,7 @@ async function saveTemplate() {
   if (!name) { $("templateHint").textContent = "Укажите название шаблона."; return; }
   const steps = collectStepsFromEditor();
   if (!steps.length) { $("templateHint").textContent = "Добавьте хотя бы один шаг."; return; }
-  const qaPlaceholder = $("templateQaPlaceholder").value.trim() || null;
+  const qaPlaceholder = normalizePlaceholderToken($("templateQaPlaceholder").value) || null;
   // Обязательно у шаблонов с докс-файлом — иначе записанный диалог молча не попадёт в
   // итоговый документ (docgen.render просто не знает, в какой плейсхолдер его вставлять).
   if (state.importedDocxFilename && !qaPlaceholder) {
@@ -926,11 +966,18 @@ async function confirmAnswer() {
   stopAutoListening();
   const answer = $("answerInput").value.trim();
   if (!answer) return;
-  const r = await fetch(`${HTTP}/api/assistant/answer`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION, answer }),
-  }).then((x) => x.json());
-  handleNext(r);
+  // См. комментарий в advanceInfo() — тот же класс ошибки: ответ сервера раньше не проверялся.
+  try {
+    const r = await fetch(`${HTTP}/api/assistant/answer`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION, answer }),
+    });
+    const data = await r.json();
+    if (!r.ok) { alert(data.error || "Не удалось сохранить ответ."); return; }
+    handleNext(data);
+  } catch (e) {
+    alert("Ошибка связи с сервером: " + e);
+  }
 }
 
 let answerRec = null;
@@ -982,11 +1029,17 @@ function renderFields(fields) {
 
 async function saveFieldEdit(key, td) {
   const value = td.innerText.trim();
-  const r = await fetch(`${HTTP}/api/assistant/field`, {
+  const resp = await fetch(`${HTTP}/api/assistant/field`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION, key, value }),
-  }).then((x) => x.json());
-  if (!r.ok) return;   // ключа нет в текущем сценарии — сюда в норме не попасть, но не рвём UI
+  });
+  const data = await resp.json();
+  // Раньше здесь проверялось `data.ok` — бизнес-флаг из ТЕЛА ответа (main.py::assistant_field
+  // возвращает {"ok": ok, "fields": ...} с кодом 200 даже когда ключа нет в текущем сценарии),
+  // а не реальный HTTP-статус. Из-за этого настоящую ошибку сервера (напр. 404 «no session»,
+  // где тела с полем "ok" вообще нет) от штатного «ключ не найден» было не отличить — обе давали
+  // falsy `data.ok`. Проверяем `resp.ok` (реальный статус), а не поле тела ответа.
+  if (!resp.ok) return;   // ключа нет в текущем сценарии — сюда в норме не попасть, но не рвём UI
   td.classList.toggle("filled", !!value);
 }
 
@@ -1673,7 +1726,21 @@ function bind() {
   $("profileSaveBtn").onclick = saveProfile;
 
   $("projectSelect").onchange = async () => {
-    state.projectId = $("projectSelect").value || null;
+    const sel = $("projectSelect");
+    const newId = sel.value || null;
+    // Допрос уже идёт (анкета начата и/или запись пишется) — случайный клик по выпадающему
+    // списку молча перепривязал бы текущую сессию к другому делу (реальный риск: список стоит
+    // прямо над остальной панелью, промахнуться легко). Как и с удалением шаблона — обычный
+    // confirm() перед необратимым в моменте действием, тот же паттерн, что и везде в клиенте.
+    const midInterrogation = state.recording || !!state.assistantStep;
+    if (midInterrogation && newId !== state.projectId && !confirm(
+      "Допрос уже идёт (анкета или запись). Сменить проект сейчас — привязать текущий допрос " +
+      "к другому делу. Продолжить?"
+    )) {
+      sel.value = state.projectId || "";
+      return;
+    }
+    state.projectId = newId;
     await initSessionProject();
   };
   $("newProjectBtn").onclick = createProject;
