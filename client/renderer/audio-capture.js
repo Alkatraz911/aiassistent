@@ -371,4 +371,124 @@ class AutoRecorder {
   }
 }
 
-window.AudioCapture = { CaptureChannel, StereoSplitCapture, OneShotRecorder, AutoRecorder };
+// Проверка микрофонов ПЕРЕД записью: короткое измерение уровня шума и речи по каждому
+// активному каналу. Реальный случай, из-за которого это появилось: сессия с двумя микрофонами
+// дала на выходе почти нечитаемый протокол — разбор сохранённой записи показал средний
+// own_snr_db около 0 дБ (речь и шум помещения на одном уровне) и 28% слов с уверенностью ASR
+// <0.5. Ни один программный фикс распознавания этого не лечит — низкий SNR нужно ловить ДО
+// допроса, а не после часа записи.
+//
+// Constraints намеренно те же, что и в CaptureChannel/StereoSplitCapture (а не «чистый» замер
+// без обработки): проверка должна отражать тот же тракт, что будет писать реальную запись,
+// иначе браузерная АРУ/шумодав включатся по-разному в проверке и в записи, и результат
+// проверки ничего не скажет о реальном SNR допроса.
+const MIC_CHECK_SILENCE_MS = 1500;
+const MIC_CHECK_SPEECH_MS = 2500;
+
+function _rms(frame) {
+  let sum = 0;
+  for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
+  return Math.sqrt(sum / (frame.length || 1));
+}
+
+function _db(rms) {
+  return 20 * Math.log10(Math.max(rms, 1e-9));
+}
+
+class MicLevelCheck {
+  // Раздельные микрофоны: { mics: [{channel, deviceId}, ...] }.
+  // Общий стерео-адаптер (см. StereoSplitCapture): { stereoDeviceId }.
+  constructor({ mics, stereoDeviceId } = {}) {
+    this.mics = mics || null;
+    this.stereoDeviceId = stereoDeviceId || null;
+  }
+
+  // onPhase(phase) — "silence" | "speech", чтобы UI показал подсказку в нужный момент.
+  // Возвращает список {channel, noiseDb, speechDb, snrDb, clipped, noSpeechDetected}.
+  async run(onPhase) {
+    const channelFrames = new Map();   // channel -> {silence:[rms...], speech:[rms...]}
+    const ensure = (ch) => {
+      if (!channelFrames.has(ch)) channelFrames.set(ch, { silence: [], speech: [] });
+      return channelFrames.get(ch);
+    };
+    let phase = "silence";
+    const opened = [];   // {ctx, node, stream} — закрыть в finally независимо от исхода
+
+    try {
+      if (this.stereoDeviceId) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: this.stereoDeviceId },
+            echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+            channelCount: 2,
+          },
+        });
+        const ctx = new AudioContext();
+        const source = ctx.createMediaStreamSource(stream);
+        const node = ctx.createScriptProcessor(4096, 2, 2);
+        node.onaudioprocess = (e) => {
+          const n = Math.min(2, e.inputBuffer.numberOfChannels);
+          for (let i = 0; i < n; i++) ensure(i)[phase].push(_rms(e.inputBuffer.getChannelData(i)));
+        };
+        source.connect(node);
+        node.connect(ctx.destination);
+        opened.push({ ctx, node, stream });
+      } else {
+        for (const m of this.mics || []) {
+          if (!m.deviceId) continue;
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              deviceId: { exact: m.deviceId },
+              echoCancellation: true, noiseSuppression: true, channelCount: 1,
+            },
+          });
+          const ctx = new AudioContext();
+          const source = ctx.createMediaStreamSource(stream);
+          const node = ctx.createScriptProcessor(4096, 1, 1);
+          const channel = m.channel;
+          node.onaudioprocess = (e) => ensure(channel)[phase].push(_rms(e.inputBuffer.getChannelData(0)));
+          source.connect(node);
+          node.connect(ctx.destination);
+          opened.push({ ctx, node, stream });
+        }
+      }
+
+      if (!opened.length) throw new Error("не выбрано ни одного микрофона");
+
+      if (onPhase) onPhase("silence");
+      await new Promise((r) => setTimeout(r, MIC_CHECK_SILENCE_MS));
+      phase = "speech";
+      if (onPhase) onPhase("speech");
+      await new Promise((r) => setTimeout(r, MIC_CHECK_SPEECH_MS));
+    } finally {
+      opened.forEach(({ ctx, node, stream }) => {
+        try { node.disconnect(); } catch (_) {}
+        try { stream.getTracks().forEach((t) => t.stop()); } catch (_) {}
+        try { ctx.close(); } catch (_) {}
+      });
+    }
+
+    const mean = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const results = [];
+    for (const [channel, frames] of channelFrames) {
+      const noiseRms = mean(frames.silence);
+      // Кадры тишины внутри окна речи (не успел/не расслышал команду) не должны портить оценку
+      // уровня речи — считаем средний уровень только по кадрам заметно громче измеренного шума.
+      const speechFrames = frames.speech.filter((r) => r > noiseRms * 1.5);
+      const spoke = speechFrames.length >= frames.speech.length * 0.1;
+      const speechRms = mean(spoke ? speechFrames : frames.speech);
+      const peak = frames.speech.reduce((m, r) => Math.max(m, r), 0);
+      results.push({
+        channel,
+        noiseDb: _db(noiseRms),
+        speechDb: _db(speechRms),
+        snrDb: _db(speechRms) - _db(noiseRms),
+        clipped: peak > 0.98,
+        noSpeechDetected: !spoke,
+      });
+    }
+    return results.sort((a, b) => a.channel - b.channel);
+  }
+}
+
+window.AudioCapture = { CaptureChannel, StereoSplitCapture, OneShotRecorder, AutoRecorder, MicLevelCheck };

@@ -23,6 +23,10 @@ const state = {
   // уже нормализованный докс-файл на сервере останется ни на что не сославшимся.
   importedDocxId: null,
   importedDocxFilename: null,
+  // Результат последней проверки микрофонов (Блок 8): {key, ok}. key — отпечаток выбора
+  // микрофонов/режима, на котором проверка проводилась; при несовпадении с текущим выбором
+  // результат уже не валиден (см. micSelectionKey/startRecording).
+  micCheck: null,
 };
 
 // ---------- health + микрофоны ----------
@@ -986,9 +990,122 @@ async function saveFieldEdit(key, td) {
   td.classList.toggle("filled", !!value);
 }
 
+// ---------- Проверка микрофонов перед записью (Блок 8) ----------
+// Отпечаток текущего выбора микрофонов/режима — проверка привязана к нему: смена микрофона
+// или переключение стерео-режима делает предыдущий результат неактуальным.
+function micSelectionKey() {
+  return $("stereoSplit").checked
+    ? `stereo:${$("mic0").value}`
+    : `dual:${$("mic0").value}:${$("mic1").value}`;
+}
+
+function micLabelFor(channel) {
+  return channel === 0 ? "Канал 0 (интервьюер)" : "Канал 1 (опрашиваемый)";
+}
+
+function micCheckVerdict(r) {
+  if (r.noSpeechDetected) return "err";
+  if (r.snrDb < 8) return "err";
+  if (r.snrDb < 15 || r.clipped) return "warn";
+  return "ok";
+}
+
+function renderMicCheckResults(report) {
+  const box = $("micCheckResults");
+  box.innerHTML = "";
+  report.forEach((r) => {
+    const v = micCheckVerdict(r);
+    const badgeText = v === "ok" ? "✓ хорошо" : v === "warn" ? "⚠ приемлемо" : "✗ плохо";
+    let advice = "";
+    if (r.noSpeechDetected) {
+      advice = "Речь не обнаружена — проверьте, что микрофон подключён и не отключен в Windows, и повторите.";
+    } else if (r.snrDb < 8) {
+      advice = "Сигнал слишком слабый на фоне шума — придвиньте микрофон ближе или увеличьте уровень записи в настройках звука Windows.";
+    } else if (r.clipped) {
+      advice = "Сигнал перегружен (клиппинг) — отодвиньте микрофон или снизьте уровень записи.";
+    } else if (r.snrDb < 15) {
+      advice = "Уровень приемлемый, но без запаса — по возможности снизьте шум в помещении.";
+    }
+    const row = document.createElement("div");
+    row.className = "mic-check-row";
+    row.innerHTML = `<div class="row" style="justify-content:space-between">
+        <b>${micLabelFor(r.channel)}</b><span class="badge ${v}">${badgeText}</span>
+      </div>
+      <p class="hint">SNR ${r.snrDb.toFixed(1)} дБ (речь ${r.speechDb.toFixed(1)} дБ, шум ${r.noiseDb.toFixed(1)} дБ)</p>
+      ${advice ? `<p class="hint">${advice}</p>` : ""}`;
+    box.appendChild(row);
+  });
+}
+
+async function runMicCheck() {
+  const stereo = $("stereoSplit").checked;
+  if (!$("mic0").value) { alert("Выберите хотя бы один микрофон."); return; }
+
+  const status = $("micCheckStatus");
+  const retryBtn = $("micCheckRetryBtn");
+  $("micCheckResults").innerHTML = "";
+  status.hidden = false;
+  retryBtn.disabled = true;
+
+  const checker = stereo
+    ? new window.AudioCapture.MicLevelCheck({ stereoDeviceId: $("mic0").value })
+    : new window.AudioCapture.MicLevelCheck({
+        mics: [{ channel: 0, deviceId: $("mic0").value }, { channel: 1, deviceId: $("mic1").value }],
+      });
+
+  try {
+    const report = await checker.run((phase) => {
+      status.textContent = phase === "silence"
+        ? "Помолчите пару секунд — измеряем уровень шума в помещении…"
+        : "Теперь скажите вслух пару слов в свой микрофон…";
+    });
+    status.hidden = true;
+    renderMicCheckResults(report);
+    state.micCheck = { key: micSelectionKey(), ok: report.every((r) => micCheckVerdict(r) !== "err"), report };
+  } catch (e) {
+    status.hidden = true;
+    $("micCheckResults").innerHTML = `<p class="hint">Не удалось проверить: ${e.message}</p>`;
+    state.micCheck = null;
+  } finally {
+    retryBtn.disabled = false;
+    retryBtn.textContent = "↻ Повторить";
+  }
+}
+
+// allowStartAnyway — открыть модалку из гейта startRecording(): показывает кнопку
+// «начать запись сейчас», чтобы плохой/отсутствующий результат проверки не блокировал реальный
+// допрос намертво — решение всё равно за оператором. Если для текущего выбора микрофонов уже
+// есть готовый результат, повторный замер не запускаем — просто показываем его снова.
+function openMicCheck(allowStartAnyway) {
+  $("micCheckStartAnywayBtn").hidden = !allowStartAnyway;
+  $("micCheckModal").hidden = false;
+  $("micCheckResults").innerHTML = "";
+  if (state.micCheck && state.micCheck.key === micSelectionKey() && state.micCheck.report) {
+    // Уже есть результат для этого выбора микрофонов — просто показываем его снова, не переслушивая.
+    $("micCheckStatus").hidden = true;
+    renderMicCheckResults(state.micCheck.report);
+    $("micCheckRetryBtn").textContent = "↻ Повторить";
+  } else {
+    // Не запускаем измерение сразу: сначала дать прочитать инструкцию (реальная жалоба —
+    // проверка стартовала мгновенно при открытии, помолчать/подготовиться не успевали).
+    $("micCheckStatus").hidden = false;
+    $("micCheckStatus").textContent = "Когда будете готовы — нажмите «Начать проверку». Сначала нужно "
+      + "будет помолчать пару секунд, затем сказать несколько слов в каждый микрофон.";
+    $("micCheckRetryBtn").textContent = "▶ Начать проверку";
+  }
+}
+
 // ---------- Протокол: стриминг (Блок 2 — partial/stable/final) ----------
 function startRecording() {
   if (!state.projectId) { alert("Сначала выберите или создайте проект (дело) — см. вверху панели."); return; }
+  if (!state.micCheck || state.micCheck.key !== micSelectionKey() || !state.micCheck.ok) {
+    openMicCheck(true);
+    return;
+  }
+  reallyStartRecording();
+}
+
+function reallyStartRecording() {
   state.ws = new WebSocket(`${WS}/ws/stream/${SESSION}`);
   state.ws.binaryType = "arraybuffer";
   state.ws.onopen = async () => {
@@ -1510,6 +1627,13 @@ function bind() {
   $("recordAnswer").onclick = toggleRecordAnswer;
   $("startRec").onclick = startRecording;
   $("stopRec").onclick = stopRecording;
+  $("micCheckBtn").onclick = () => openMicCheck(false);
+  $("micCheckRetryBtn").onclick = runMicCheck;
+  $("micCheckStartAnywayBtn").onclick = () => {
+    $("micCheckModal").hidden = true;
+    reallyStartRecording();
+  };
+  $("micCheckCloseBtn").onclick = () => ($("micCheckModal").hidden = true);
   $("finalizeBtn").onclick = finalizeTimecodes;
   $("diarizeBtn").onclick = diarizeVoices;
   $("saveBtn").onclick = async () => {

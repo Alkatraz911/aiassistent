@@ -1,3 +1,6 @@
+# Claude Code worktrees for background subagents
+.claude/
+
 # Python
 # Без префикса пути — venv может лежать и в корне, и в backend/; правило `backend/.venv/`
 # корневой не покрывало, и он попадал в `git add -A` двадцатью с лишним мегабайтами.

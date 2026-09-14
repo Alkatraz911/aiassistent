@@ -167,6 +167,8 @@ td.v.filled { color: #1f7a45; }
 .modal-card input { width: 100%; padding: 8px; border: 1px solid #cfd6e4; border-radius: 7px; margin-bottom: 10px; }
 #templateQaPlaceholder:invalid { border-color: #c5384a; }
 #templateQaPlaceholderHint.required { color: #a5374a; }
+.mic-check-row { border: 1px solid #e3e8f2; border-radius: 8px; padding: 8px 10px; margin-top: 10px; }
+.mic-check-row .hint { margin: 4px 0 0; }
 
 .modal-card-wide { width: min(1320px, 94vw); max-height: 88vh; overflow-y: auto; }
 

@@ -92,6 +92,7 @@
         <div class="rec-controls">
           <button id="startRec" class="rec">● Начать запись</button>
           <button id="stopRec" class="stop" disabled>■ Стоп</button>
+          <button id="micCheckBtn" class="ghost" title="Измерить соотношение сигнал/шум по каждому микрофону до начала допроса — плохой уровень потом не лечится программно">🎚 Проверить микрофоны</button>
           <button id="diarizeBtn" class="ghost" title="Запись велась одним общим микрофоном: развести реплики по голосам (ECAPA + кластеризация). Не нужно, если у каждого участника свой микрофон — там голоса разделены самой записью.">👥 Разметить голоса</button>
           <button id="finalizeBtn" class="ghost">✨ Уточнить тайм-коды</button>
           <button id="saveBtn" class="ghost">💾 Сохранить</button>
@@ -127,6 +128,23 @@
         <button id="newProjectCreate">Создать</button>
       </div>
       <p class="hint" id="newProjectHint"></p>
+    </div>
+  </div>
+
+  <!-- модалка проверки микрофонов перед записью -->
+  <div id="micCheckModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>Проверка микрофонов</h3>
+      <p class="hint">Сначала помолчите, затем скажите вслух пару слов в каждый микрофон — так
+        измеряется реальное соотношение сигнал/шум до начала допроса. Плохой уровень потом не
+        исправить обработкой записи.</p>
+      <p id="micCheckStatus" class="hint"></p>
+      <div id="micCheckResults"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="micCheckRetryBtn" class="ghost">▶ Начать проверку</button>
+        <button id="micCheckStartAnywayBtn" class="ghost" hidden>Начать запись сейчас</button>
+        <button id="micCheckCloseBtn">Закрыть</button>
+      </div>
     </div>
   </div>
 
